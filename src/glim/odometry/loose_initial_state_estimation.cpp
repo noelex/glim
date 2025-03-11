@@ -88,7 +88,10 @@ void LooseInitialStateEstimation::insert_imu(double stamp, const Eigen::Vector3d
 }
 
 EstimationFrame::ConstPtr LooseInitialStateEstimation::initial_pose() {
-  if (T_odom_lidar.empty() || T_odom_lidar.back().first - T_odom_lidar.front().first < window_size) {
+  const auto& imu_data = imu_integration->imu_data_in_queue();
+  if (
+    (T_odom_lidar.empty() || T_odom_lidar.back().first - T_odom_lidar.front().first < window_size) ||
+    (imu_data.empty() || imu_data.back()[0] - imu_data.front()[0] < window_size)) {
     return nullptr;
   }
 
@@ -120,7 +123,6 @@ EstimationFrame::ConstPtr LooseInitialStateEstimation::initial_pose() {
   graph.emplace_shared<gtsam_points::LinearDampingFactor>(X(0), (gtsam::Vector6() << 0.0, 0.0, 1.0, 0.0, 0.0, 0.0).finished() * 1e6);
   graph.emplace_shared<gtsam::PoseTranslationPrior<gtsam::Pose3>>(X(0), gtsam::Vector3::Zero(), gtsam::noiseModel::Isotropic::Precision(3, 1e3));
 
-  const auto& imu_data = imu_integration->imu_data_in_queue();
   int imu_cursor = 0;
 
   Eigen::Vector3d sum_acc_odom = Eigen::Vector3d::Zero();
