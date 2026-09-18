@@ -284,6 +284,21 @@ void test_merge_candidate() {
   expect(!disconnected.connectivity.all_poses_reachable(), "candidate must remain disconnected when soft bridges are disabled");
   expect(disconnected.connectivity.pose_component_count == 2, "disconnected candidate pose component count is incorrect");
 
+  auto edited = disconnected;
+  gtsam::NonlinearFactorGraph first_manual_factors;
+  first_manual_factors.emplace_shared<gtsam::BetweenFactor<gtsam::Pose3>>(X(3), X(4), gtsam::Pose3(gtsam::Rot3(), gtsam::Point3(1.0, 0.0, 0.0)), hard_noise);
+  glim::append_candidate_factors(edited, first_manual_factors);
+  expect(!edited.connectivity.all_poses_reachable(), "a manual factor within one component must not hide a disconnected component");
+
+  gtsam::NonlinearFactorGraph connecting_manual_factor;
+  connecting_manual_factor.emplace_shared<gtsam::BetweenFactor<gtsam::Pose3>>(
+    X(4), X(2), edited.values.at<gtsam::Pose3>(X(4)).between(edited.values.at<gtsam::Pose3>(X(2))), hard_noise);
+  glim::append_candidate_factors(edited, connecting_manual_factor);
+  expect(edited.connectivity.all_poses_reachable(), "manual factors failed to repair a disconnected candidate");
+  expect(edited.diagnostic.empty(), "connected candidate retained a disconnected diagnostic");
+  const auto edited_trial = glim::build_trial_isam2(edited.factors, edited.values, gtsam::ISAM2Params());
+  expect(edited_trial.estimate.size() == edited.values.size(), "manually repaired candidate failed trial build");
+
   options.ensure_connected_graph = true;
   const auto connected = glim::build_session_merge_candidate(target_factors, target_values, source_factors, source_values, 3, 5, options);
   expect(connected.connectivity.all_poses_reachable(), "soft bridges failed to connect all candidate poses");

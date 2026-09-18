@@ -141,6 +141,13 @@ struct GlobalMappingCallbacks {
   static CallbackSlot<void()> request_to_optimize;
 
   /**
+   * @brief Request adding factors to the graph currently accepting edits
+   * @param factors Factors to add
+   * @note  This is a special inverse-direction callback slot
+   */
+  static CallbackSlot<void(const gtsam::NonlinearFactorGraph& factors)> request_to_add_graph_factors;
+
+  /**
    * @brief Request committing the pending session merge as a graph transaction
    * @param options Frozen session merge options
    * @note  This is a special inverse-direction callback slot

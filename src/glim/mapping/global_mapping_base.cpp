@@ -27,6 +27,8 @@ void GlobalMappingBase::insert_submap(const SubMap::Ptr& submap) {
 
 void GlobalMappingBase::find_overlapping_submaps(double min_overlap) {}
 
+void GlobalMappingBase::add_graph_factors(const gtsam::NonlinearFactorGraph&) {}
+
 void GlobalMappingBase::optimize() {}
 
 GraphEditState GlobalMappingBase::graph_edit_state() const { return GraphEditState::IDLE; }

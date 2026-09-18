@@ -16,6 +16,10 @@ AsyncGlobalMapping::AsyncGlobalMapping(const std::shared_ptr<glim::GlobalMapping
   request_to_find_overlapping_submaps.store(-1.0);
 
   GlobalMappingCallbacks::request_to_optimize.add([this] { request_to_optimize = true; });
+  GlobalMappingCallbacks::request_to_add_graph_factors.add([this](const gtsam::NonlinearFactorGraph& factors) {
+    std::lock_guard<std::mutex> lock(graph_factors_request_mutex);
+    graph_factors_request.add(factors);
+  });
   GlobalMappingCallbacks::request_to_merge_sessions.add([this](const SessionMergeOptions& options) {
     std::lock_guard<std::mutex> lock(merge_request_mutex);
     merge_request = options;
@@ -112,6 +116,18 @@ void AsyncGlobalMapping::run() {
       if (requested_merge) {
         std::lock_guard<std::mutex> lock(global_mapping_mutex);
         global_mapping->merge_sessions(*requested_merge);
+        last_optimization_time = std::chrono::high_resolution_clock::now();
+      }
+
+      gtsam::NonlinearFactorGraph requested_graph_factors;
+      {
+        std::lock_guard<std::mutex> lock(graph_factors_request_mutex);
+        requested_graph_factors = std::move(graph_factors_request);
+        graph_factors_request = gtsam::NonlinearFactorGraph();
+      }
+      if (!requested_graph_factors.empty()) {
+        std::lock_guard<std::mutex> lock(global_mapping_mutex);
+        global_mapping->add_graph_factors(requested_graph_factors);
         last_optimization_time = std::chrono::high_resolution_clock::now();
       }
 

@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <memory>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -10,7 +11,6 @@
 
 #include <glim/mapping/sub_map.hpp>
 #include <glim/util/extension_module.hpp>
-#include <glim/util/concurrent_vector.hpp>
 #include <gtsam_points/util/gtsam_migration.hpp>
 
 namespace spdlog {
@@ -127,9 +127,6 @@ protected:
 
   // Factors
   std::vector<std::tuple<FactorType, std::uint64_t, std::uint64_t>> global_factors;
-
-  // Factors to be inserted into the global mapping graph
-  ConcurrentVector<gtsam_points::shared_ptr<gtsam::NonlinearFactor>> new_factors;
 
   // Logging
   std::shared_ptr<spdlog::logger> logger;
