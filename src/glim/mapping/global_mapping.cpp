@@ -33,6 +33,7 @@
 #include <glim/util/serialization.hpp>
 #include <glim/common/imu_integration.hpp>
 #include <glim/mapping/callbacks.hpp>
+#include <glim/mapping/graph_metadata.hpp>
 
 #ifdef GTSAM_USE_TBB
 #include <tbb/task_arena.h>
@@ -573,11 +574,11 @@ void GlobalMapping::save(const std::string& path) {
   serializeToBinaryFile(serializable_factors, path + "/graph.bin");
   serializeToBinaryFile(isam2->calculateEstimate(), path + "/values.bin");
 
-  std::ofstream ofs(path + "/graph.txt");
-  ofs << "num_submaps: " << submaps.size() << std::endl;
-  ofs << "num_all_frames: " << std::accumulate(submaps.begin(), submaps.end(), 0, [](int sum, const SubMap::ConstPtr& submap) { return sum + submap->frames.size(); }) << std::endl;
-
-  ofs << "num_matching_cost_factors: " << matching_cost_factors.size() << std::endl;
+  GraphMetadata metadata;
+  metadata.num_submaps = submaps.size();
+  metadata.num_all_frames = std::accumulate(submaps.begin(), submaps.end(), 0, [](int sum, const SubMap::ConstPtr& submap) { return sum + submap->frames.size(); });
+  metadata.num_active_frames = metadata.num_all_frames;
+  metadata.matching_cost_factors.reserve(matching_cost_factors.size());
   for (const auto& factor : matching_cost_factors) {
     std::string type;
 
@@ -594,8 +595,11 @@ void GlobalMapping::save(const std::string& path) {
 
     gtsam::Symbol symbol0(factor.second->keys()[0]);
     gtsam::Symbol symbol1(factor.second->keys()[1]);
-    ofs << "matching_cost " << type << " " << symbol0.index() << " " << symbol1.index() << std::endl;
+    metadata.matching_cost_factors.push_back({type, static_cast<int>(symbol0.index()), static_cast<int>(symbol1.index())});
   }
+
+  std::ofstream ofs(path + "/graph.txt");
+  write_graph_metadata(ofs, metadata);
 
   std::ofstream odom_lidar_ofs(path + "/odom_lidar.txt");
   std::ofstream traj_lidar_ofs(path + "/traj_lidar.txt");
@@ -694,20 +698,17 @@ bool GlobalMapping::load(const std::string& path) {
     return false;
   }
 
-  const int start_from_frame_id = submaps.size();
-
-  std::string token;
-  int num_submaps, num_all_frames, num_matching_cost_factors;
-
-  ifs >> token >> num_submaps;
-  ifs >> token >> num_all_frames;
-  ifs >> token >> num_matching_cost_factors;
-
-  std::vector<std::tuple<std::string, int, int>> matching_cost_factors(num_matching_cost_factors);
-  for (int i = 0; i < num_matching_cost_factors; i++) {
-    auto& factor = matching_cost_factors[i];
-    ifs >> token >> std::get<0>(factor) >> std::get<1>(factor) >> std::get<2>(factor);
+  GraphMetadata metadata;
+  try {
+    metadata = parse_graph_metadata(ifs);
+  } catch (const std::exception& e) {
+    logger->error("failed to parse {}/graph.txt: {}", path, e.what());
+    return false;
   }
+
+  const int start_from_frame_id = submaps.size();
+  const int num_submaps = metadata.num_submaps;
+  const auto& matching_cost_factors = metadata.matching_cost_factors;
 
   logger->info("Load submaps (session_id={})", session_id);
   submaps.reserve(submaps.size() + num_submaps);
@@ -845,9 +846,9 @@ bool GlobalMapping::load(const std::string& path) {
 
   logger->info("creating matching cost factors");
   for (const auto& factor : matching_cost_factors) {
-    const auto type = std::get<0>(factor);
-    const auto first = std::get<1>(factor) + start_from_frame_id;
-    const auto second = std::get<2>(factor) + start_from_frame_id;
+    const auto& type = factor.type;
+    const auto first = factor.first + start_from_frame_id;
+    const auto second = factor.second + start_from_frame_id;
 
     if (type == "vgicp" || type == "vgicp_gpu") {
       if (params.enable_gpu) {

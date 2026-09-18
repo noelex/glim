@@ -20,6 +20,8 @@ option(BUILD_WITH_VIEWER "Build with visualizer" ON)
 option(BUILD_WITH_MARCH_NATIVE "Build with -march=native" OFF)
 option(BUILD_WITH_OPENCV "Build with OpenCV to support camera images" ON)
 
+include(CTest)
+
 if(BUILD_WITH_MARCH_NATIVE)
   add_definitions(-march=native)
   add_definitions(-DBUILD_WITH_MARCH_NATIVE)
@@ -102,6 +104,7 @@ add_library(glim SHARED
   src/glim/mapping/async_global_mapping.cpp
   src/glim/mapping/sub_mapping.cpp
   src/glim/mapping/sub_mapping_passthrough.cpp
+  src/glim/mapping/graph_metadata.cpp
   src/glim/mapping/global_mapping.cpp
   src/glim/mapping/global_mapping_pose_graph.cpp
   # GPU-related
@@ -156,6 +159,15 @@ foreach(module_src IN LISTS module_srcs)
   )
   list(APPEND glim_LIBRARIES ${module_name})
 endforeach()
+
+if(BUILD_TESTING)
+  add_executable(graph_metadata_test
+    test/graph_metadata_test.cpp
+    src/glim/mapping/graph_metadata.cpp
+  )
+  target_include_directories(graph_metadata_test PRIVATE include)
+  add_test(NAME graph_metadata_test COMMAND graph_metadata_test)
+endif()
 
 
 if(BUILD_WITH_VIEWER)
