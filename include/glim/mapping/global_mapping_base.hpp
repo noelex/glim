@@ -15,6 +15,9 @@ class logger;
 
 namespace glim {
 
+enum class GraphEditState;
+struct SessionMergeOptions;
+
 /**
  * @brief Global mapping base class
  *
@@ -56,6 +59,17 @@ public:
    * @brief Request to perform optimization
    */
   virtual void optimize();
+
+  /**
+   * @brief Get the current graph editing state
+   */
+  virtual GraphEditState graph_edit_state() const;
+
+  /**
+   * @brief Build and commit a candidate for the pending session merge
+   * @param options Frozen session merge options
+   */
+  virtual void merge_sessions(const SessionMergeOptions& options);
 
   /**
    * @brief Request to detect and recover graph corruption

@@ -171,6 +171,7 @@ if(BUILD_TESTING)
 
   add_executable(graph_edit_test
     test/graph_edit_test.cpp
+    src/glim/mapping/graph_metadata.cpp
     src/glim/mapping/graph_edit.cpp
   )
   target_include_directories(graph_edit_test PRIVATE include)

@@ -1,7 +1,9 @@
 #pragma once
 
 #include <array>
+#include <cstddef>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include <gtsam/geometry/Pose3.h>
@@ -14,18 +16,29 @@
 #include <gtsam_points/optimizers/isam2_ext.hpp>
 #include <gtsam_points/optimizers/isam2_result_ext.hpp>
 
+#include <glim/mapping/graph_metadata.hpp>
+
 namespace glim {
+
+/**
+ * @brief State of the graph editing workflow
+ */
+enum class GraphEditState {
+  IDLE,
+  SESSION_MERGE_PENDING,
+  CANDIDATE_EDITING,
+};
 
 /**
  * @brief Keys owned by one submap
  *
- * A submap owns one origin pose and two endpoint extrinsic, velocity, and bias states.
+ * A submap owns one origin pose and two endpoint pose, velocity, and bias states.
  */
 struct SubmapStateKeys {
-  gtsam::Key pose;                         ///< Origin pose X(i)
-  std::array<gtsam::Key, 2> extrinsics;    ///< Endpoint extrinsics E(2i), E(2i+1)
-  std::array<gtsam::Key, 2> velocities;    ///< Endpoint velocities V(2i), V(2i+1)
-  std::array<gtsam::Key, 2> biases;        ///< Endpoint biases B(2i), B(2i+1)
+  gtsam::Key origin_pose;                    ///< Origin pose X(i)
+  std::array<gtsam::Key, 2> endpoint_poses;  ///< Endpoint poses E(2i), E(2i+1)
+  std::array<gtsam::Key, 2> velocities;      ///< Endpoint velocities V(2i), V(2i+1)
+  std::array<gtsam::Key, 2> biases;          ///< Endpoint biases B(2i), B(2i+1)
 
   /**
    * @brief Get all keys in the state block
@@ -46,7 +59,7 @@ SubmapStateKeys submap_state_keys(int submap_id);
  * @param submap_ids Submap IDs
  * @return Deduplicated X/E/V/B keys
  */
-gtsam::KeySet submap_state_key_set(const std::vector<int>& submap_ids);
+gtsam::KeySet collect_submap_state_keys(const std::vector<int>& submap_ids);
 
 /**
  * @brief Copy values except those in the removal set
@@ -75,88 +88,152 @@ void validate_factor_keys(const gtsam::NonlinearFactorGraph& factors, const gtsa
 /**
  * @brief Full pose gauge anchor information
  */
-struct PoseAnchor {
+struct PoseGaugeAnchor {
+  enum class Type {
+    POSE_PRIOR,
+    LINEAR_DAMPING,
+  };
+
+  Type type;
   gtsam::Key key;                       ///< Anchored X key
-  gtsam::Pose3 prior;                   ///< Prior mean
-  gtsam::SharedNoiseModel noise_model;  ///< Full pose prior noise model
+  gtsam::Pose3 prior;                   ///< Prior mean for a pose prior
+  gtsam::SharedNoiseModel noise_model;  ///< Pose prior noise model
+  gtsam::Vector damping_diagonal;       ///< Hessian diagonal for linear damping
 };
 
 /**
  * @brief Find full pose gauge anchors
  * @param factors Factors to inspect
- * @return PriorFactor<Pose3> records on X keys
+ * @return Full pose gauge anchors on X keys
  */
-std::vector<PoseAnchor> find_full_pose_anchors(const gtsam::NonlinearFactorGraph& factors);
+std::vector<PoseGaugeAnchor> find_pose_gauge_anchors(const gtsam::NonlinearFactorGraph& factors);
 
 /**
  * @brief Find the unique full pose gauge anchor
  * @param factors Factors to inspect
- * @return Unique full pose anchor
+ * @return Unique full pose gauge anchor
  * @throws std::invalid_argument if the graph has zero or multiple anchors
  */
-PoseAnchor find_unique_full_pose_anchor(const gtsam::NonlinearFactorGraph& factors);
+PoseGaugeAnchor find_unique_pose_gauge_anchor(const gtsam::NonlinearFactorGraph& factors);
 
 /**
  * @brief Preserve or deterministically transfer the full pose gauge anchor
  * @param candidate_factors Candidate factors to update
  * @param candidate_values Candidate values after pruning
- * @param original_anchor Anchor from the stable graph
+ * @param original_anchor Anchor from the target graph
  * @param active_target_submaps Active target submap IDs
  *
- * If the original anchor was pruned, a new prior with the same noise model is
- * placed at the current pose of the lowest active target submap ID.
+ * If the original anchor was pruned, an equivalent anchor is placed at the
+ * current pose of the lowest active target submap ID.
  */
-void ensure_pose_anchor(
+void ensure_pose_gauge_anchor(
   gtsam::NonlinearFactorGraph& candidate_factors,
   const gtsam::Values& candidate_values,
-  const PoseAnchor& original_anchor,
+  const PoseGaugeAnchor& original_anchor,
   const std::vector<int>& active_target_submaps);
 
 /**
- * @brief Connectivity result for the complete key-factor graph
+ * @brief Connectivity information for a complete key-factor graph
  */
-struct KeyFactorConnectivity {
+struct GraphConnectivity {
   std::vector<gtsam::KeyVector> components;  ///< Components containing all value keys
   gtsam::KeyVector reachable_keys;           ///< Keys reachable from the gauge anchor
   gtsam::KeyVector unreachable_pose_keys;    ///< X keys not reachable from the anchor
-  size_t pose_component_count = 0;           ///< Number of components containing X keys
+  std::size_t pose_component_count = 0;      ///< Number of components containing X keys
 
   /// @brief Check whether every pose is reachable from the gauge anchor
   bool all_poses_reachable() const { return unreachable_pose_keys.empty(); }
 };
 
 /**
- * @brief Analyze connectivity using factors as hyperedges over all value keys
+ * @brief Analyze graph connectivity using factors as hyperedges over value keys
  * @param values Graph values
  * @param factors Graph factors
  * @param anchor_key Full pose gauge anchor key
  * @return Complete key components and pose reachability diagnostics
  */
-KeyFactorConnectivity analyze_key_factor_connectivity(
+GraphConnectivity analyze_graph_connectivity(
   const gtsam::Values& values,
   const gtsam::NonlinearFactorGraph& factors,
   gtsam::Key anchor_key);
 
 /**
- * @brief Result of a successful strict temporary iSAM2 build
+ * @brief Result of building and validating a graph in a temporary iSAM2
  */
-struct StrictTrialBuildResult {
-  std::unique_ptr<gtsam_points::ISAM2Ext> isam2;  ///< Validated temporary optimizer
-  gtsam_points::ISAM2ResultExt update_result;     ///< Initial update result
-  gtsam::Values estimate;                        ///< Complete optimized estimate
+struct TrialISAM2Build {
+  std::unique_ptr<gtsam_points::ISAM2Ext> optimizer;  ///< Temporary optimizer
+  gtsam_points::ISAM2ResultExt update_result;         ///< Initial update result
+  gtsam::Values estimate;                             ///< Complete optimized estimate
 };
+
+/**
+ * @brief Options captured when committing a pending session merge
+ */
+struct SessionMergeOptions {
+  gtsam::NonlinearFactor::shared_ptr merge_factor;  ///< User-confirmed target-to-source merge factor
+  std::vector<SubmapRange> prune_ranges;            ///< Target submap ranges to prune
+
+  bool ensure_connected_graph = true;                 ///< Add soft bridge factors when needed
+  double bridge_rotation_sigma = 0.08726646259971647; ///< Soft bridge rotation sigma in radians
+  double bridge_translation_sigma = 0.5;              ///< Soft bridge translation sigma in meters
+};
+
+/**
+ * @brief Candidate graph produced by a session merge transaction
+ */
+struct CandidateGraph {
+  gtsam::NonlinearFactorGraph factors;
+  gtsam::Values values;
+
+  std::vector<SubmapRange> requested_prune_ranges;
+  std::vector<SubmapRange> applied_prune_ranges;
+
+  GraphConnectivity connectivity;
+
+  int source_begin = 0;  ///< First submap ID owned by the source session
+  std::string diagnostic;
+};
+
+/**
+ * @brief Apply a global rigid transform to a session's complete state
+ * @param values Session values
+ * @param transform Global transform applied to X/E and whose rotation is applied to V
+ * @return Transformed values with biases and unknown value types unchanged
+ */
+gtsam::Values transform_session_values(const gtsam::Values& values, const gtsam::Pose3& transform);
+
+/**
+ * @brief Build a filtered session merge candidate without modifying the target graph
+ * @param target_factors Current target graph factors
+ * @param target_values Current target graph values
+ * @param source_factors Additional source session factors
+ * @param source_values Additional source session values
+ * @param source_begin First submap ID owned by the source session
+ * @param total_submaps Total target and source submap count
+ * @param options Frozen session merge options
+ * @return Candidate graph and connectivity diagnostics
+ */
+CandidateGraph build_session_merge_candidate(
+  const gtsam::NonlinearFactorGraph& target_factors,
+  const gtsam::Values& target_values,
+  const gtsam::NonlinearFactorGraph& source_factors,
+  const gtsam::Values& source_values,
+  int source_begin,
+  int total_submaps,
+  const SessionMergeOptions& options);
 
 /**
  * @brief Build and validate a graph in a fresh iSAM2 instance
  * @param factors Complete candidate factors
  * @param values Complete candidate initial values
- * @param params Parameters shared with the formal optimizer
+ * @param params Parameters shared with the active optimizer
  * @return Temporary optimizer, update result, and complete estimate
  *
- * Exceptions are intentionally propagated to the transaction caller. The
- * stable optimizer is never accessed or modified by this function.
+ * Factor/value consistency is validated before insertion. Exceptions are
+ * intentionally propagated to the transaction caller. The active optimizer
+ * is never accessed or modified by this function.
  */
-StrictTrialBuildResult strict_trial_isam2_build(
+TrialISAM2Build build_trial_isam2(
   const gtsam::NonlinearFactorGraph& factors,
   const gtsam::Values& values,
   const gtsam::ISAM2Params& params);

@@ -3,6 +3,7 @@
 #include <glim/util/logging.hpp>
 #include <glim/util/load_module.hpp>
 #include <glim/mapping/callbacks.hpp>
+#include <glim/mapping/graph_edit.hpp>
 
 namespace glim {
 
@@ -27,6 +28,10 @@ void GlobalMappingBase::insert_submap(const SubMap::Ptr& submap) {
 void GlobalMappingBase::find_overlapping_submaps(double min_overlap) {}
 
 void GlobalMappingBase::optimize() {}
+
+GraphEditState GlobalMappingBase::graph_edit_state() const { return GraphEditState::IDLE; }
+
+void GlobalMappingBase::merge_sessions(const SessionMergeOptions&) {}
 
 void GlobalMappingBase::recover_graph() {}
 

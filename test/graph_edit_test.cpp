@@ -11,6 +11,8 @@
 #include <gtsam/sam/RangeFactor.h>
 #include <gtsam/slam/BetweenFactor.h>
 
+#include <gtsam_points/factors/linear_damping_factor.hpp>
+
 namespace {
 
 using gtsam::symbol_shorthand::B;
@@ -45,9 +47,9 @@ public:
 
 void insert_submap_values(gtsam::Values& values, const int submap_id) {
   const auto keys = glim::submap_state_keys(submap_id);
-  values.insert(keys.pose, gtsam::Pose3(gtsam::Rot3(), gtsam::Point3(submap_id, 0.0, 0.0)));
-  values.insert(keys.extrinsics[0], gtsam::Pose3());
-  values.insert(keys.extrinsics[1], gtsam::Pose3());
+  values.insert(keys.origin_pose, gtsam::Pose3(gtsam::Rot3(), gtsam::Point3(submap_id, 0.0, 0.0)));
+  values.insert(keys.endpoint_poses[0], gtsam::Pose3());
+  values.insert(keys.endpoint_poses[1], gtsam::Pose3());
   values.insert(keys.velocities[0], gtsam::Vector3(0.0, 0.0, 0.0));
   values.insert(keys.velocities[1], gtsam::Vector3(0.0, 0.0, 0.0));
   values.insert(keys.biases[0], gtsam::imuBias::ConstantBias());
@@ -56,11 +58,11 @@ void insert_submap_values(gtsam::Values& values, const int submap_id) {
 
 void test_submap_keys_and_filtering() {
   const auto keys = glim::submap_state_keys(3);
-  expect(keys.pose == X(3), "submap pose key is incorrect");
-  expect(keys.extrinsics == std::array<gtsam::Key, 2>{E(6), E(7)}, "submap extrinsic keys are incorrect");
+  expect(keys.origin_pose == X(3), "submap origin pose key is incorrect");
+  expect(keys.endpoint_poses == std::array<gtsam::Key, 2>{E(6), E(7)}, "submap endpoint pose keys are incorrect");
   expect(keys.velocities == std::array<gtsam::Key, 2>{V(6), V(7)}, "submap velocity keys are incorrect");
   expect(keys.biases == std::array<gtsam::Key, 2>{B(6), B(7)}, "submap bias keys are incorrect");
-  expect(glim::submap_state_key_set({1, 1, 2}).size() == 14, "submap key set must remove duplicate IDs");
+  expect(glim::collect_submap_state_keys({1, 1, 2}).size() == 14, "collected submap state keys must remove duplicate IDs");
   expect_throw<std::invalid_argument>([] { glim::submap_state_keys(-1); }, "negative submap ID must be rejected");
 
   gtsam::Values values;
@@ -77,7 +79,7 @@ void test_submap_keys_and_filtering() {
   factors.push_back(std::make_shared<KeyOnlyFactor>(gtsam::KeyVector{X(0), V(2), B(3)}));
   factors.push_back(gtsam::NonlinearFactor::shared_ptr());
 
-  const auto removed_keys = glim::submap_state_key_set({1});
+  const auto removed_keys = glim::collect_submap_state_keys({1});
   const auto filtered_values = glim::filter_values_by_keys(values, removed_keys);
   const auto filtered_factors = glim::filter_factors_by_keys(factors, removed_keys);
 
@@ -121,35 +123,48 @@ void test_pose_anchors() {
   original_factors.emplace_shared<gtsam::PriorFactor<gtsam::Pose3>>(X(0), original_prior, anchor_noise);
   original_factors.emplace_shared<gtsam::PriorFactor<gtsam::Vector3>>(V(0), gtsam::Vector3::Zero(), gtsam::noiseModel::Isotropic::Sigma(3, 1.0));
 
-  const auto original_anchor = glim::find_unique_full_pose_anchor(original_factors);
-  expect(original_anchor.key == X(0), "full pose anchor key is incorrect");
-  expect(original_anchor.prior.equals(original_prior), "full pose anchor prior is incorrect");
+  const auto original_anchor = glim::find_unique_pose_gauge_anchor(original_factors);
+  expect(original_anchor.type == glim::PoseGaugeAnchor::Type::POSE_PRIOR, "pose prior gauge anchor type is incorrect");
+  expect(original_anchor.key == X(0), "pose gauge anchor key is incorrect");
+  expect(original_anchor.prior.equals(original_prior), "pose gauge anchor prior is incorrect");
 
   gtsam::Values candidate_values;
   const gtsam::Pose3 target_pose(gtsam::Rot3::Rz(0.4), gtsam::Point3(5.0, 6.0, 7.0));
   candidate_values.insert(X(1), target_pose);
   candidate_values.insert(X(2), gtsam::Pose3());
   gtsam::NonlinearFactorGraph candidate_factors;
-  glim::ensure_pose_anchor(candidate_factors, candidate_values, original_anchor, {2, 1});
+  glim::ensure_pose_gauge_anchor(candidate_factors, candidate_values, original_anchor, {2, 1});
 
-  const auto transferred = glim::find_unique_full_pose_anchor(candidate_factors);
-  expect(transferred.key == X(1), "anchor must transfer to the lowest active target submap ID");
-  expect(transferred.prior.equals(target_pose), "transferred anchor must use the current global pose");
-  expect(transferred.noise_model->equals(*anchor_noise), "transferred anchor must preserve the original noise model");
+  const auto transferred = glim::find_unique_pose_gauge_anchor(candidate_factors);
+  expect(transferred.key == X(1), "gauge anchor must transfer to the lowest active target submap ID");
+  expect(transferred.prior.equals(target_pose), "transferred gauge anchor must use the current global pose");
+  expect(transferred.noise_model->equals(*anchor_noise), "transferred gauge anchor must preserve the original noise model");
 
-  expect_throw<std::invalid_argument>([] { glim::find_unique_full_pose_anchor({}); }, "zero full pose anchors must be rejected");
+  expect_throw<std::invalid_argument>([] { glim::find_unique_pose_gauge_anchor({}); }, "zero pose gauge anchors must be rejected");
 
   gtsam::NonlinearFactorGraph multiple_anchors;
   multiple_anchors.emplace_shared<gtsam::PriorFactor<gtsam::Pose3>>(X(0), gtsam::Pose3(), anchor_noise);
   multiple_anchors.emplace_shared<gtsam::PriorFactor<gtsam::Pose3>>(X(1), gtsam::Pose3(), anchor_noise);
-  expect_throw<std::invalid_argument>([&] { glim::find_unique_full_pose_anchor(multiple_anchors); }, "multiple full pose anchors must be rejected");
+  expect_throw<std::invalid_argument>([&] { glim::find_unique_pose_gauge_anchor(multiple_anchors); }, "multiple pose gauge anchors must be rejected");
 
   gtsam::Values old_anchor_still_active;
   old_anchor_still_active.insert(X(0), gtsam::Pose3());
   gtsam::NonlinearFactorGraph missing_anchor;
   expect_throw<std::invalid_argument>(
-    [&] { glim::ensure_pose_anchor(missing_anchor, old_anchor_still_active, original_anchor, {0}); },
-    "a missing anchor must not be silently recreated when its original value remains active");
+    [&] { glim::ensure_pose_gauge_anchor(missing_anchor, old_anchor_still_active, original_anchor, {0}); },
+    "a missing gauge anchor must not be silently recreated when its original value remains active");
+
+  gtsam::NonlinearFactorGraph damping_factors;
+  damping_factors.emplace_shared<gtsam_points::LinearDampingFactor>(X(0), 6, 123.0);
+  const auto damping_anchor = glim::find_unique_pose_gauge_anchor(damping_factors);
+  expect(damping_anchor.type == glim::PoseGaugeAnchor::Type::LINEAR_DAMPING, "linear damping gauge anchor type is incorrect");
+  expect(damping_anchor.damping_diagonal.isApprox(gtsam::Vector6::Constant(123.0)), "linear damping diagonal is incorrect");
+
+  gtsam::NonlinearFactorGraph transferred_damping;
+  glim::ensure_pose_gauge_anchor(transferred_damping, candidate_values, damping_anchor, {1, 2});
+  const auto new_damping_anchor = glim::find_unique_pose_gauge_anchor(transferred_damping);
+  expect(new_damping_anchor.key == X(1), "linear damping gauge anchor was not transferred");
+  expect(new_damping_anchor.damping_diagonal.isApprox(damping_anchor.damping_diagonal), "transferred damping semantics changed");
 }
 
 void test_connectivity() {
@@ -167,7 +182,7 @@ void test_connectivity() {
   factors.emplace_shared<gtsam::BetweenFactor<gtsam::Pose3>>(X(0), E(0), gtsam::Pose3(), noise);
   factors.push_back(std::make_shared<KeyOnlyFactor>(gtsam::KeyVector{E(0), V(0), X(1)}));
 
-  const auto connectivity = glim::analyze_key_factor_connectivity(values, factors, X(0));
+  const auto connectivity = glim::analyze_graph_connectivity(values, factors, X(0));
   expect(connectivity.components.size() == 3, "full key-factor component count is incorrect");
   expect(connectivity.pose_component_count == 2, "pose component count is incorrect");
   expect(connectivity.unreachable_pose_keys == gtsam::KeyVector{X(2)}, "unreachable pose detection is incorrect");
@@ -178,18 +193,18 @@ void test_connectivity() {
       without_x2.insert(value.key, value.value);
     }
   }
-  const auto isolated_auxiliary = glim::analyze_key_factor_connectivity(without_x2, factors, X(0));
+  const auto isolated_auxiliary = glim::analyze_graph_connectivity(without_x2, factors, X(0));
   expect(isolated_auxiliary.all_poses_reachable(), "isolated E/V/B state must not fail pose connectivity");
   expect(isolated_auxiliary.components.size() == 2, "isolated auxiliary state must remain visible in full components");
 
   gtsam::NonlinearFactorGraph missing_key_factor;
   missing_key_factor.emplace_shared<gtsam::BetweenFactor<gtsam::Pose3>>(X(0), X(9), gtsam::Pose3(), noise);
   expect_throw<std::invalid_argument>(
-    [&] { glim::analyze_key_factor_connectivity(values, missing_key_factor, X(0)); },
+    [&] { glim::analyze_graph_connectivity(values, missing_key_factor, X(0)); },
     "factor references to missing keys must be rejected");
 }
 
-void test_strict_trial_build() {
+void test_trial_isam2_build() {
   const auto noise = gtsam::noiseModel::Isotropic::Sigma(6, 0.1);
   gtsam::Values values;
   values.insert(X(0), gtsam::Pose3());
@@ -199,28 +214,106 @@ void test_strict_trial_build() {
   factors.emplace_shared<gtsam::PriorFactor<gtsam::Pose3>>(X(0), gtsam::Pose3(), noise);
   factors.emplace_shared<gtsam::BetweenFactor<gtsam::Pose3>>(X(0), X(1), gtsam::Pose3(gtsam::Rot3(), gtsam::Point3(1.0, 0.0, 0.0)), noise);
 
-  const auto result = glim::strict_trial_isam2_build(factors, values, gtsam::ISAM2Params());
-  expect(result.isam2 != nullptr, "strict trial build did not return the temporary iSAM2 instance");
-  expect(result.estimate.size() == values.size(), "strict trial build result is incomplete");
+  const auto result = glim::build_trial_isam2(factors, values, gtsam::ISAM2Params());
+  expect(result.optimizer != nullptr, "trial build did not return the temporary iSAM2 instance");
+  expect(result.estimate.size() == values.size(), "trial build result is incomplete");
 
   gtsam::Values disconnected_values = values;
   disconnected_values.insert(X(2), gtsam::Pose3());
   expect_throw<std::invalid_argument>(
-    [&] { glim::strict_trial_isam2_build(factors, disconnected_values, gtsam::ISAM2Params()); },
-    "disconnected pose values must fail strict trial build");
+    [&] { glim::build_trial_isam2(factors, disconnected_values, gtsam::ISAM2Params()); },
+    "disconnected pose values must fail trial build");
 
   gtsam::Values isolated_auxiliary = values;
   isolated_auxiliary.insert(V(0), gtsam::Vector3(0.0, 0.0, 0.0));
   expect_throw(
-    [&] { glim::strict_trial_isam2_build(factors, isolated_auxiliary, gtsam::ISAM2Params()); },
-    "unconstrained auxiliary values must fail strict trial build");
+    [&] { glim::build_trial_isam2(factors, isolated_auxiliary, gtsam::ISAM2Params()); },
+    "unconstrained auxiliary values must fail trial build");
 
   gtsam::NonlinearFactorGraph underconstrained;
   underconstrained.emplace_shared<gtsam::PriorFactor<gtsam::Pose3>>(X(0), gtsam::Pose3(), noise);
   underconstrained.emplace_shared<gtsam::RangeFactor<gtsam::Pose3, gtsam::Pose3>>(X(0), X(1), 1.0, gtsam::noiseModel::Isotropic::Sigma(1, 0.1));
   expect_throw(
-    [&] { glim::strict_trial_isam2_build(underconstrained, values, gtsam::ISAM2Params()); },
-    "topologically connected but numerically underconstrained graph must fail strict trial build");
+    [&] { glim::build_trial_isam2(underconstrained, values, gtsam::ISAM2Params()); },
+    "topologically connected but numerically underconstrained graph must fail trial build");
+}
+
+void test_session_transform() {
+  gtsam::Values values;
+  values.insert(X(3), gtsam::Pose3(gtsam::Rot3::Rz(0.2), gtsam::Point3(1.0, 0.0, 0.0)));
+  values.insert(E(6), gtsam::Pose3(gtsam::Rot3::Rz(-0.1), gtsam::Point3(0.0, 2.0, 0.0)));
+  values.insert(V(6), gtsam::Vector3(1.0, 2.0, 3.0));
+  values.insert(B(6), gtsam::imuBias::ConstantBias(gtsam::Vector3(0.1, 0.2, 0.3), gtsam::Vector3(0.4, 0.5, 0.6)));
+
+  const gtsam::Pose3 transform(gtsam::Rot3::Rz(1.5707963267948966), gtsam::Point3(10.0, 20.0, 30.0));
+  const auto transformed = glim::transform_session_values(values, transform);
+
+  expect(transformed.at<gtsam::Pose3>(X(3)).equals(transform * values.at<gtsam::Pose3>(X(3))), "X pose transform is incorrect");
+  expect(transformed.at<gtsam::Pose3>(E(6)).equals(transform * values.at<gtsam::Pose3>(E(6))), "E pose transform is incorrect");
+  expect(transformed.at<gtsam::Vector3>(V(6)).isApprox(transform.rotation().rotate(values.at<gtsam::Vector3>(V(6)))), "V rotation is incorrect");
+  expect(transformed.at<gtsam::imuBias::ConstantBias>(B(6)).equals(values.at<gtsam::imuBias::ConstantBias>(B(6))), "bias must remain unchanged");
+}
+
+void test_merge_candidate() {
+  const auto hard_noise = gtsam::noiseModel::Isotropic::Sigma(6, 0.1);
+  gtsam::Values target_values;
+  target_values.insert(X(0), gtsam::Pose3());
+  target_values.insert(X(1), gtsam::Pose3(gtsam::Rot3(), gtsam::Point3(10.0, 0.0, 0.0)));
+  target_values.insert(X(2), gtsam::Pose3(gtsam::Rot3(), gtsam::Point3(20.0, 0.0, 0.0)));
+
+  gtsam::NonlinearFactorGraph target_factors;
+  target_factors.emplace_shared<gtsam_points::LinearDampingFactor>(X(0), 6, 1e6);
+  target_factors.emplace_shared<gtsam::BetweenFactor<gtsam::Pose3>>(X(0), X(1), target_values.at<gtsam::Pose3>(X(0)).between(target_values.at<gtsam::Pose3>(X(1))), hard_noise);
+  target_factors.emplace_shared<gtsam::BetweenFactor<gtsam::Pose3>>(X(1), X(2), target_values.at<gtsam::Pose3>(X(1)).between(target_values.at<gtsam::Pose3>(X(2))), hard_noise);
+
+  gtsam::Values source_values;
+  source_values.insert(X(3), gtsam::Pose3());
+  source_values.insert(X(4), gtsam::Pose3(gtsam::Rot3(), gtsam::Point3(1.0, 0.0, 0.0)));
+  gtsam::NonlinearFactorGraph source_factors;
+  source_factors.emplace_shared<gtsam::BetweenFactor<gtsam::Pose3>>(X(3), X(4), gtsam::Pose3(gtsam::Rot3(), gtsam::Point3(1.0, 0.0, 0.0)), hard_noise);
+
+  glim::SessionMergeOptions options;
+  options.merge_factor = gtsam::make_shared<gtsam::BetweenFactor<gtsam::Pose3>>(X(0), X(3), gtsam::Pose3(gtsam::Rot3(), gtsam::Point3(5.0, 0.0, 0.0)), hard_noise);
+  options.prune_ranges = {{1, 1}};
+  options.ensure_connected_graph = false;
+
+  const auto disconnected = glim::build_session_merge_candidate(target_factors, target_values, source_factors, source_values, 3, 5, options);
+  expect(!disconnected.values.exists(X(1)), "pruned pose remains in candidate values");
+  expect(disconnected.values.at<gtsam::Pose3>(X(3)).translation().isApprox(gtsam::Point3(5.0, 0.0, 0.0)), "source session global transform is incorrect");
+  expect(disconnected.factors.size() == 3, "disconnected candidate factor count is incorrect");
+  expect(!disconnected.connectivity.all_poses_reachable(), "candidate must remain disconnected when soft bridges are disabled");
+  expect(disconnected.connectivity.pose_component_count == 2, "disconnected candidate pose component count is incorrect");
+
+  options.ensure_connected_graph = true;
+  const auto connected = glim::build_session_merge_candidate(target_factors, target_values, source_factors, source_values, 3, 5, options);
+  expect(connected.connectivity.all_poses_reachable(), "soft bridges failed to connect all candidate poses");
+  expect(connected.factors.size() == 4, "soft bridging must add exactly one factor per disconnected target component");
+  const auto bridge_factor = dynamic_cast<const gtsam::BetweenFactor<gtsam::Pose3>*>(connected.factors.back().get());
+  expect(bridge_factor && bridge_factor->key1() == X(4) && bridge_factor->key2() == X(2), "soft bridging did not select the nearest source-to-target pair");
+  const auto trial_build = glim::build_trial_isam2(connected.factors, connected.values, gtsam::ISAM2Params());
+  expect(trial_build.estimate.size() == connected.values.size(), "connected session merge candidate failed trial build");
+
+  options.prune_ranges.clear();
+  const auto ordinary_merge = glim::build_session_merge_candidate(target_factors, target_values, source_factors, source_values, 3, 5, options);
+  expect(ordinary_merge.connectivity.all_poses_reachable(), "ordinary merge without pruning must remain connected");
+  expect(ordinary_merge.values.size() == target_values.size() + source_values.size(), "ordinary merge lost values");
+  expect(ordinary_merge.factors.size() == target_factors.size() + source_factors.size() + 1, "ordinary merge added unexpected factors");
+
+  options.merge_factor = gtsam::make_shared<gtsam::BetweenFactor<gtsam::Pose3>>(
+    X(3), X(0), gtsam::Pose3(gtsam::Rot3(), gtsam::Point3(-5.0, 0.0, 0.0)), hard_noise);
+  const auto reversed_merge = glim::build_session_merge_candidate(target_factors, target_values, source_factors, source_values, 3, 5, options);
+  expect(reversed_merge.values.at<gtsam::Pose3>(X(3)).equals(ordinary_merge.values.at<gtsam::Pose3>(X(3))), "reversed merge factor changed the source transform");
+
+  options.merge_factor = gtsam::make_shared<gtsam::BetweenFactor<gtsam::Pose3>>(
+    X(0), X(3), gtsam::Pose3(gtsam::Rot3(), gtsam::Point3(5.0, 0.0, 0.0)), hard_noise);
+  options.prune_ranges = {{0, 0}};
+  expect_throw<std::invalid_argument>(
+    [&] { glim::build_session_merge_candidate(target_factors, target_values, source_factors, source_values, 3, 5, options); },
+    "merge factor endpoint must not be pruned");
+  options.prune_ranges = {{0, 2}};
+  expect_throw<std::invalid_argument>(
+    [&] { glim::build_session_merge_candidate(target_factors, target_values, source_factors, source_values, 3, 5, options); },
+    "pruning every target submap must be rejected");
 }
 
 }  // namespace
@@ -231,7 +324,9 @@ int main() {
     test_filter_positions();
     test_pose_anchors();
     test_connectivity();
-    test_strict_trial_build();
+    test_trial_isam2_build();
+    test_session_transform();
+    test_merge_candidate();
   } catch (const std::exception& e) {
     std::cerr << "graph_edit_test failed: " << e.what() << std::endl;
     return 1;

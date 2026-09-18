@@ -5,6 +5,7 @@
 #include <spdlog/spdlog.h>
 #include <glim/mapping/sub_map.hpp>
 #include <glim/mapping/callbacks.hpp>
+#include <glim/mapping/graph_edit.hpp>
 #include <glim/odometry/callbacks.hpp>
 #include <glim/util/concurrent_vector.hpp>
 #include <glim/util/config.hpp>
@@ -405,10 +406,17 @@ void InteractiveViewer::run_modals() {
   std::vector<gtsam::NonlinearFactor::shared_ptr> factors;
 
   auto manual_loop_close_factor = manual_loop_close_modal->run();
-  if (manual_loop_close_factor) {
+  if (manual_loop_close_factor && needs_session_merge) {
+    SessionMergeOptions options;
+    options.merge_factor = manual_loop_close_factor;
+
+    const auto& keys = manual_loop_close_factor->keys();
+    global_factors.emplace_back(FactorType::BETWEEN, keys[0], keys[1]);
     needs_session_merge = false;
+    GlobalMappingCallbacks::request_to_merge_sessions(options);
+  } else {
+    factors.push_back(manual_loop_close_factor);
   }
-  factors.push_back(manual_loop_close_factor);
   factors.push_back(bundle_adjustment_modal->run());
 
   factors.erase(std::remove(factors.begin(), factors.end(), nullptr), factors.end());
@@ -602,49 +610,6 @@ void InteractiveViewer::globalmap_on_update_submaps(const std::vector<SubMap::Pt
  */
 void InteractiveViewer::globalmap_on_smoother_update(gtsam_points::ISAM2Ext& isam2, gtsam::NonlinearFactorGraph& new_factors, gtsam::Values& new_values) {
   auto factors = this->new_factors.get_all_and_clear();
-
-  // Explicitly move the poses of merged submaps to the coordinate system of the origin of the first session
-  for (const auto& factor : factors) {
-    auto between = dynamic_cast<const gtsam::BetweenFactor<gtsam::Pose3>*>(factor.get());
-    if (!between) {
-      continue;
-    }
-
-    gtsam::Key target = between->key1();
-    gtsam::Key source = between->key2();
-    if (!new_values.exists(target) && !new_values.exists(source)) {
-      continue;
-    }
-
-    if (new_values.exists(target)) {
-      logger->error("Target exists in new_values");
-      continue;
-    }
-
-    logger->info("Moving newly added submaps to the coordinate system of the origin of the first session");
-    if (!new_values.exists(source)) {
-      std::swap(target, source);
-    }
-
-    const gtsam::Pose3 T_target_source = between->measured();
-    const gtsam::Pose3 T_worldt_target(submaps[gtsam::Symbol(target).index()]->T_world_origin.matrix());
-    const gtsam::Pose3 T_worlds_source(submaps[gtsam::Symbol(source).index()]->T_world_origin.matrix());
-    const gtsam::Pose3 T_worldt_worlds = T_worldt_target * T_target_source * T_worlds_source.inverse();
-
-    int moved_count = 0;
-    for (const auto& value : new_values) {
-      const gtsam::Symbol symbol(value.key);
-      if (symbol.chr() != 'x') {
-        continue;
-      }
-
-      new_values.insert_or_assign(value.key, T_worldt_worlds * value.value.cast<gtsam::Pose3>());
-      moved_count++;
-    }
-
-    logger->info("Moved {} submaps", moved_count);
-  }
-
   new_factors.add(factors);
 
   std::vector<std::tuple<FactorType, gtsam::Key, gtsam::Key>> inserted_factors;

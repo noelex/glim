@@ -1,12 +1,16 @@
 #include <glim/mapping/graph_edit.hpp>
 
 #include <algorithm>
+#include <limits>
 #include <map>
 #include <set>
 #include <stdexcept>
 
 #include <gtsam/inference/Symbol.h>
 #include <gtsam/nonlinear/PriorFactor.h>
+#include <gtsam/slam/BetweenFactor.h>
+
+#include <gtsam_points/factors/linear_damping_factor.hpp>
 
 namespace glim {
 namespace {
@@ -53,7 +57,7 @@ private:
 }  // namespace
 
 gtsam::KeyVector SubmapStateKeys::all() const {
-  return {pose, extrinsics[0], extrinsics[1], velocities[0], velocities[1], biases[0], biases[1]};
+  return {origin_pose, endpoint_poses[0], endpoint_poses[1], velocities[0], velocities[1], biases[0], biases[1]};
 }
 
 SubmapStateKeys submap_state_keys(const int submap_id) {
@@ -68,7 +72,7 @@ SubmapStateKeys submap_state_keys(const int submap_id) {
   return {X(submap_id), {E(2 * submap_id), E(2 * submap_id + 1)}, {V(2 * submap_id), V(2 * submap_id + 1)}, {B(2 * submap_id), B(2 * submap_id + 1)}};
 }
 
-gtsam::KeySet submap_state_key_set(const std::vector<int>& submap_ids) {
+gtsam::KeySet collect_submap_state_keys(const std::vector<int>& submap_ids) {
   gtsam::KeySet keys;
   for (const int submap_id : submap_ids) {
     const auto state_keys = submap_state_keys(submap_id).all();
@@ -118,69 +122,83 @@ void validate_factor_keys(const gtsam::NonlinearFactorGraph& factors, const gtsa
   }
 }
 
-std::vector<PoseAnchor> find_full_pose_anchors(const gtsam::NonlinearFactorGraph& factors) {
-  std::vector<PoseAnchor> anchors;
+std::vector<PoseGaugeAnchor> find_pose_gauge_anchors(const gtsam::NonlinearFactorGraph& factors) {
+  std::vector<PoseGaugeAnchor> anchors;
   for (const auto& factor : factors) {
     if (!factor) {
       continue;
     }
 
     const auto prior = dynamic_cast<const gtsam::PriorFactor<gtsam::Pose3>*>(factor.get());
-    if (!prior || !is_pose_key(prior->key())) {
+    if (prior && is_pose_key(prior->key())) {
+      anchors.push_back({PoseGaugeAnchor::Type::POSE_PRIOR, prior->key(), prior->prior(), prior->noiseModel(), {}});
       continue;
     }
-    anchors.push_back({prior->key(), prior->prior(), prior->noiseModel()});
+
+    const auto damping = dynamic_cast<const gtsam_points::LinearDampingFactor*>(factor.get());
+    if (damping && damping->keys().size() == 1 && is_pose_key(damping->keys().front())) {
+      // LinearContainerFactor::dim() is always one for Hessian-backed factors,
+      // so identify a full pose gauge anchor from the information matrix instead.
+      const auto information = damping->toHessian()->information();
+      if (information.rows() == 6 && information.cols() == 6) {
+        anchors.push_back({PoseGaugeAnchor::Type::LINEAR_DAMPING, damping->keys().front(), {}, nullptr, information.diagonal()});
+      }
+    }
   }
   return anchors;
 }
 
-PoseAnchor find_unique_full_pose_anchor(const gtsam::NonlinearFactorGraph& factors) {
-  const auto anchors = find_full_pose_anchors(factors);
+PoseGaugeAnchor find_unique_pose_gauge_anchor(const gtsam::NonlinearFactorGraph& factors) {
+  const auto anchors = find_pose_gauge_anchors(factors);
   if (anchors.size() != 1) {
-    throw std::invalid_argument("expected exactly one full pose anchor, found " + std::to_string(anchors.size()));
+    throw std::invalid_argument("expected exactly one pose gauge anchor, found " + std::to_string(anchors.size()));
   }
   return anchors.front();
 }
 
-void ensure_pose_anchor(
+void ensure_pose_gauge_anchor(
   gtsam::NonlinearFactorGraph& candidate_factors,
   const gtsam::Values& candidate_values,
-  const PoseAnchor& original_anchor,
+  const PoseGaugeAnchor& original_anchor,
   const std::vector<int>& active_target_submaps) {
-  const auto candidate_anchors = find_full_pose_anchors(candidate_factors);
+  const auto candidate_anchors = find_pose_gauge_anchors(candidate_factors);
   if (candidate_anchors.size() > 1) {
-    throw std::invalid_argument("expected at most one candidate full pose anchor, found " + std::to_string(candidate_anchors.size()));
+    throw std::invalid_argument("expected at most one candidate pose gauge anchor, found " + std::to_string(candidate_anchors.size()));
   }
   if (candidate_anchors.size() == 1) {
     return;
   }
   if (candidate_values.exists(original_anchor.key)) {
-    throw std::invalid_argument("candidate pose anchor is missing while its value remains active");
+    throw std::invalid_argument("candidate pose gauge anchor is missing while its value remains active");
   }
   if (active_target_submaps.empty()) {
-    throw std::invalid_argument("cannot transfer pose anchor without an active target submap");
+    throw std::invalid_argument("cannot transfer pose gauge anchor without an active target submap");
   }
 
   for (const int submap_id : active_target_submaps) {
-    if (!candidate_values.exists(submap_state_keys(submap_id).pose)) {
+    if (!candidate_values.exists(submap_state_keys(submap_id).origin_pose)) {
       throw std::invalid_argument("active target submap is missing its pose value");
     }
   }
 
   const int target_id = *std::min_element(active_target_submaps.begin(), active_target_submaps.end());
-  const auto target_key = submap_state_keys(target_id).pose;
-  // Transfer only the gauge noise semantics; the new mean is the active
-  // submap's current global pose.
-  candidate_factors.emplace_shared<gtsam::PriorFactor<gtsam::Pose3>>(target_key, candidate_values.at<gtsam::Pose3>(target_key), original_anchor.noise_model);
+  const auto target_key = submap_state_keys(target_id).origin_pose;
+  if (original_anchor.type == PoseGaugeAnchor::Type::POSE_PRIOR) {
+    // Transfer only the gauge noise semantics; the new mean is the active
+    // submap's current global pose.
+    candidate_factors.emplace_shared<gtsam::PriorFactor<gtsam::Pose3>>(target_key, candidate_values.at<gtsam::Pose3>(target_key), original_anchor.noise_model);
+  } else {
+    candidate_factors.emplace_shared<gtsam_points::LinearDampingFactor>(target_key, original_anchor.damping_diagonal);
+  }
 }
 
-KeyFactorConnectivity analyze_key_factor_connectivity(
+GraphConnectivity analyze_graph_connectivity(
   const gtsam::Values& values,
   const gtsam::NonlinearFactorGraph& factors,
   const gtsam::Key anchor_key) {
   validate_factor_keys(factors, values);
   if (!values.exists(anchor_key)) {
-    throw std::invalid_argument("pose anchor key is missing from values");
+    throw std::invalid_argument("pose gauge anchor key is missing from values");
   }
 
   KeyComponents key_components(values);
@@ -198,7 +216,7 @@ KeyFactorConnectivity analyze_key_factor_connectivity(
     components_by_root[key_components.find(value.key)].push_back(value.key);
   }
 
-  KeyFactorConnectivity connectivity;
+  GraphConnectivity connectivity;
   for (auto& item : components_by_root) {
     connectivity.components.push_back(std::move(item.second));
   }
@@ -222,14 +240,182 @@ KeyFactorConnectivity analyze_key_factor_connectivity(
   return connectivity;
 }
 
-StrictTrialBuildResult strict_trial_isam2_build(
+gtsam::Values transform_session_values(const gtsam::Values& values, const gtsam::Pose3& transform) {
+  gtsam::Values transformed;
+  for (const auto& value : values) {
+    const gtsam::Symbol symbol(value.key);
+    if (symbol.chr() == 'x' || symbol.chr() == 'e') {
+      transformed.insert(value.key, transform * value.value.cast<gtsam::Pose3>());
+    } else if (symbol.chr() == 'v') {
+      transformed.insert(value.key, transform.rotation().rotate(value.value.cast<gtsam::Vector3>()));
+    } else {
+      transformed.insert(value.key, value.value);
+    }
+  }
+  return transformed;
+}
+
+CandidateGraph build_session_merge_candidate(
+  const gtsam::NonlinearFactorGraph& target_factors,
+  const gtsam::Values& target_values,
+  const gtsam::NonlinearFactorGraph& source_factors,
+  const gtsam::Values& source_values,
+  const int source_begin,
+  const int total_submaps,
+  const SessionMergeOptions& options) {
+  if (source_begin <= 0 || source_begin >= total_submaps) {
+    throw std::invalid_argument("session merge candidate requires non-empty target and source sessions");
+  }
+  if (!options.merge_factor) {
+    throw std::invalid_argument("session merge candidate requires a merge factor");
+  }
+  if (options.bridge_rotation_sigma <= 0.0 || options.bridge_translation_sigma <= 0.0) {
+    throw std::invalid_argument("soft bridge sigmas must be positive");
+  }
+
+  validate_factor_keys(target_factors, target_values);
+  validate_factor_keys(source_factors, source_values);
+  const auto original_anchor = find_unique_pose_gauge_anchor(target_factors);
+
+  CandidateGraph candidate;
+  candidate.source_begin = source_begin;
+  candidate.requested_prune_ranges = normalize_submap_ranges(options.prune_ranges);
+  candidate.applied_prune_ranges = candidate.requested_prune_ranges;
+  for (const auto& range : candidate.requested_prune_ranges) {
+    if (range.last >= source_begin) {
+      throw std::invalid_argument("prune range must only contain target submaps");
+    }
+  }
+
+  const auto pruned_ids = submap_ranges_to_ids(candidate.applied_prune_ranges);
+  const auto pruned_keys = collect_submap_state_keys(pruned_ids);
+  std::vector<int> active_target_submaps;
+  for (int i = 0; i < source_begin; i++) {
+    if (!std::binary_search(pruned_ids.begin(), pruned_ids.end(), i)) {
+      active_target_submaps.push_back(i);
+    }
+  }
+  if (active_target_submaps.empty()) {
+    throw std::invalid_argument("session merge candidate must retain at least one active target submap");
+  }
+
+  const auto merge_factor = dynamic_cast<const gtsam::BetweenFactor<gtsam::Pose3>*>(options.merge_factor.get());
+  if (!merge_factor) {
+    throw std::invalid_argument("merge factor must be BetweenFactor<Pose3>");
+  }
+  const gtsam::Symbol first_symbol(merge_factor->key1());
+  const gtsam::Symbol second_symbol(merge_factor->key2());
+  if (first_symbol.chr() != 'x' || second_symbol.chr() != 'x') {
+    throw std::invalid_argument("merge factor must connect two submap poses");
+  }
+
+  const bool first_is_target = first_symbol.index() < static_cast<size_t>(source_begin);
+  const bool second_is_target = second_symbol.index() < static_cast<size_t>(source_begin);
+  if (first_is_target == second_is_target) {
+    throw std::invalid_argument("merge factor must connect target and source sessions");
+  }
+
+  const gtsam::Key target_key = first_is_target ? merge_factor->key1() : merge_factor->key2();
+  const gtsam::Key source_key = first_is_target ? merge_factor->key2() : merge_factor->key1();
+  if (gtsam::Symbol(source_key).index() >= static_cast<size_t>(total_submaps)) {
+    throw std::invalid_argument("merge factor source is outside the pending source session");
+  }
+  if (pruned_keys.count(target_key)) {
+    throw std::invalid_argument("merge factor references a pruned target submap");
+  }
+  if (!target_values.exists(target_key) || !source_values.exists(source_key)) {
+    throw std::invalid_argument("merge factor references a missing pose value");
+  }
+
+  const gtsam::Pose3 target_pose = target_values.at<gtsam::Pose3>(target_key);
+  const gtsam::Pose3 source_pose = source_values.at<gtsam::Pose3>(source_key);
+  const gtsam::Pose3 target_T_source = first_is_target ? merge_factor->measured() : merge_factor->measured().inverse();
+  const gtsam::Pose3 world_target_T_world_source = target_pose * target_T_source * source_pose.inverse();
+  const auto transformed_source_values = transform_session_values(source_values, world_target_T_world_source);
+
+  candidate.factors = filter_factors_by_keys(target_factors, pruned_keys);
+  candidate.values = filter_values_by_keys(target_values, pruned_keys);
+  candidate.factors.add(source_factors);
+  candidate.values.insert(transformed_source_values);
+  candidate.factors.push_back(options.merge_factor);
+
+  ensure_pose_gauge_anchor(candidate.factors, candidate.values, original_anchor, active_target_submaps);
+  auto anchor = find_unique_pose_gauge_anchor(candidate.factors);
+  candidate.connectivity = analyze_graph_connectivity(candidate.values, candidate.factors, anchor.key);
+
+  if (options.ensure_connected_graph && !candidate.connectivity.all_poses_reachable()) {
+    const gtsam::Vector6 sigmas =
+      (gtsam::Vector6() << options.bridge_rotation_sigma,
+       options.bridge_rotation_sigma,
+       options.bridge_rotation_sigma,
+       options.bridge_translation_sigma,
+       options.bridge_translation_sigma,
+       options.bridge_translation_sigma)
+        .finished();
+    const auto noise = gtsam::noiseModel::Diagonal::Sigmas(sigmas);
+
+    for (const auto& component : candidate.connectivity.components) {
+      std::vector<int> component_targets;
+      bool contains_source = false;
+      for (const gtsam::Key key : component) {
+        const gtsam::Symbol symbol(key);
+        if (symbol.chr() != 'x') {
+          continue;
+        }
+        if (symbol.index() < static_cast<size_t>(source_begin)) {
+          component_targets.push_back(symbol.index());
+        } else {
+          contains_source = true;
+        }
+      }
+      if (component_targets.empty() || contains_source) {
+        continue;
+      }
+
+      double best_squared_distance = std::numeric_limits<double>::max();
+      int best_target = -1;
+      int best_source = -1;
+      for (const int target_id : component_targets) {
+        const auto target = candidate.values.at<gtsam::Pose3>(gtsam::Symbol('x', target_id));
+        for (int source_id = source_begin; source_id < total_submaps; source_id++) {
+          const auto source = candidate.values.at<gtsam::Pose3>(gtsam::Symbol('x', source_id));
+          const double squared_distance = (target.translation() - source.translation()).squaredNorm();
+          if (squared_distance < best_squared_distance) {
+            best_squared_distance = squared_distance;
+            best_target = target_id;
+            best_source = source_id;
+          }
+        }
+      }
+
+      const auto source_pose_global = candidate.values.at<gtsam::Pose3>(gtsam::Symbol('x', best_source));
+      const auto target_pose_global = candidate.values.at<gtsam::Pose3>(gtsam::Symbol('x', best_target));
+      candidate.factors.emplace_shared<gtsam::BetweenFactor<gtsam::Pose3>>(
+        gtsam::Symbol('x', best_source),
+        gtsam::Symbol('x', best_target),
+        source_pose_global.between(target_pose_global),
+        noise);
+    }
+
+    candidate.connectivity = analyze_graph_connectivity(candidate.values, candidate.factors, anchor.key);
+  }
+
+  if (!candidate.connectivity.all_poses_reachable()) {
+    candidate.diagnostic = "Graph has " + std::to_string(candidate.connectivity.pose_component_count) +
+                           " connected components. Add loop closures or find overlapping submaps before optimization.";
+  }
+
+  return candidate;
+}
+
+TrialISAM2Build build_trial_isam2(
   const gtsam::NonlinearFactorGraph& factors,
   const gtsam::Values& values,
   const gtsam::ISAM2Params& params) {
   validate_factor_keys(factors, values);
 
   // iSAM2 can retain an unreferenced initial value without proving it is
-  // observable, so reject such values before treating the trial as strict.
+  // observable, so reject such values before accepting the trial build.
   gtsam::KeySet referenced_keys;
   for (const auto& factor : factors) {
     referenced_keys.insert(factor->keys().begin(), factor->keys().end());
@@ -240,16 +426,16 @@ StrictTrialBuildResult strict_trial_isam2_build(
     }
   }
 
-  const auto anchor = find_unique_full_pose_anchor(factors);
-  const auto connectivity = analyze_key_factor_connectivity(values, factors, anchor.key);
+  const auto anchor = find_unique_pose_gauge_anchor(factors);
+  const auto connectivity = analyze_graph_connectivity(values, factors, anchor.key);
   if (!connectivity.all_poses_reachable()) {
-    throw std::invalid_argument("not all pose values are reachable from the full pose anchor");
+    throw std::invalid_argument("not all pose values are reachable from the pose gauge anchor");
   }
 
-  StrictTrialBuildResult result;
-  result.isam2 = std::make_unique<gtsam_points::ISAM2Ext>(params);
-  result.update_result = result.isam2->update(factors, values);
-  result.estimate = result.isam2->calculateEstimate();
+  TrialISAM2Build result;
+  result.optimizer = std::make_unique<gtsam_points::ISAM2Ext>(params);
+  result.update_result = result.optimizer->update(factors, values);
+  result.estimate = result.optimizer->calculateEstimate();
 
   if (result.estimate.size() != values.size()) {
     throw std::runtime_error("trial iSAM2 result does not contain all candidate values");
