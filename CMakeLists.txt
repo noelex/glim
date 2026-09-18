@@ -105,6 +105,7 @@ add_library(glim SHARED
   src/glim/mapping/sub_mapping.cpp
   src/glim/mapping/sub_mapping_passthrough.cpp
   src/glim/mapping/graph_metadata.cpp
+  src/glim/mapping/graph_edit.cpp
   src/glim/mapping/global_mapping.cpp
   src/glim/mapping/global_mapping_pose_graph.cpp
   # GPU-related
@@ -167,6 +168,14 @@ if(BUILD_TESTING)
   )
   target_include_directories(graph_metadata_test PRIVATE include)
   add_test(NAME graph_metadata_test COMMAND graph_metadata_test)
+
+  add_executable(graph_edit_test
+    test/graph_edit_test.cpp
+    src/glim/mapping/graph_edit.cpp
+  )
+  target_include_directories(graph_edit_test PRIVATE include)
+  target_link_libraries(graph_edit_test PRIVATE gtsam gtsam_points::gtsam_points)
+  add_test(NAME graph_edit_test COMMAND graph_edit_test)
 endif()
 
 
