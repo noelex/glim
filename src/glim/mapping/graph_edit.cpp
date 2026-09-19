@@ -276,7 +276,6 @@ CandidateGraph build_session_merge_candidate(
   const auto original_anchor = find_unique_pose_gauge_anchor(target_factors);
 
   CandidateGraph candidate;
-  candidate.source_begin = source_begin;
   candidate.requested_prune_ranges = normalize_submap_ranges(options.prune_ranges);
   for (const auto& range : candidate.requested_prune_ranges) {
     if (range.last >= source_begin) {

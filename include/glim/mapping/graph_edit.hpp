@@ -197,7 +197,6 @@ struct CandidateGraph {
 
   GraphConnectivity connectivity;
 
-  int source_begin = 0;  ///< First submap ID owned by the source session
   std::string diagnostic;
 };
 
