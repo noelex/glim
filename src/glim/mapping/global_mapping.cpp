@@ -454,6 +454,15 @@ GraphEditState GlobalMapping::graph_edit_state() const {
   return edit_state;
 }
 
+void GlobalMapping::notify_graph_edit_state() const {
+  auto unavailable_ranges = union_submap_ranges(pruned_ranges, pending_source_pruned_ranges);
+  if (candidate) {
+    unavailable_ranges = union_submap_ranges(unavailable_ranges, candidate->applied_prune_ranges);
+  }
+  const auto unavailable_mask = submap_ranges_to_mask(unavailable_ranges, submaps.size());
+  Callbacks::on_graph_edit_state_changed(edit_state, unavailable_mask);
+}
+
 void GlobalMapping::merge_sessions(const SessionMergeOptions& options) {
   if (edit_state != GraphEditState::SESSION_MERGE_PENDING) {
     logger->warn("cannot merge sessions without a pending source session");
@@ -471,8 +480,10 @@ void GlobalMapping::merge_sessions(const SessionMergeOptions& options) {
     edit_state = GraphEditState::CANDIDATE_EDITING;
     new_factors->resize(0);
     new_values->clear();
+    notify_graph_edit_state();
   } catch (const std::exception& e) {
     logger->error("failed to build session merge candidate: {}", e.what());
+    notify_graph_edit_state();
     return;
   }
 
@@ -511,6 +522,7 @@ bool GlobalMapping::try_commit_candidate() {
     rebuild_pruned_mask();
     candidate.reset();
     edit_state = GraphEditState::IDLE;
+    notify_graph_edit_state();
 
     update_submaps();
     Callbacks::on_smoother_update_result(*isam2, committed_result);
@@ -1178,6 +1190,7 @@ bool GlobalMapping::load(const std::string& path) {
 
   logger->info("done");
   session_id++;
+  notify_graph_edit_state();
 
   return true;
 }

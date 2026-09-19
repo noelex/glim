@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+
 #include <glim/util/callback_slot.hpp>
 #include <glim/odometry/estimation_frame.hpp>
 #include <glim/mapping/sub_map.hpp>
@@ -23,6 +25,7 @@ class LevenbergMarquardtOptimizationStatus;
 
 namespace glim {
 
+enum class GraphEditState;
 struct SessionMergeOptions;
 
 /**
@@ -133,6 +136,13 @@ struct GlobalMappingCallbacks {
    * @param result  iSAM2 result
    */
   static CallbackSlot<void(gtsam_points::ISAM2Ext& isam2, const gtsam_points::ISAM2ResultExt& result)> on_smoother_update_result;
+
+  /**
+   * @brief Graph edit state update callback
+   * @param state         Current graph edit state
+   * @param pruned_mask   Submaps unavailable for selection or rendering
+   */
+  static CallbackSlot<void(GraphEditState state, const std::vector<uint8_t>& pruned_mask)> on_graph_edit_state_changed;
 
   /**
    * @brief Request the global mapping module to perform optimization

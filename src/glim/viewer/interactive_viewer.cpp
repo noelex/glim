@@ -1,5 +1,6 @@
 #include <glim/viewer/interactive_viewer.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <thread>
 #include <spdlog/spdlog.h>
@@ -64,6 +65,17 @@ InteractiveViewer::InteractiveViewer() : logger(create_module_logger("viewer")) 
   cont_optimize = false;
 
   needs_session_merge = false;
+  current_graph_edit_state = GraphEditState::IDLE;
+  prune_selection_mode = false;
+  hide_selected_submaps = false;
+  ensure_connected_graph = true;
+  session_merge_in_progress = false;
+  prune_range_start = -1;
+  prune_range_end = -1;
+  prune_start_input = 0;
+  prune_end_input = 0;
+  bridge_rotation_sigma_deg = 5.0f;
+  bridge_translation_sigma = 0.5f;
 
   enable_partial_rendering = config.param("interactive_viewer", "enable_partial_rendering", false);
   partial_rendering_budget = config.param("interactive_viewer", "partial_rendering_budget", 1024);
@@ -88,6 +100,7 @@ InteractiveViewer::InteractiveViewer() : logger(create_module_logger("viewer")) 
   GlobalMappingCallbacks::on_update_submaps.add(std::bind(&InteractiveViewer::globalmap_on_update_submaps, this, _1));
   GlobalMappingCallbacks::on_smoother_update.add(std::bind(&InteractiveViewer::globalmap_on_smoother_update, this, _1, _2, _3));
   GlobalMappingCallbacks::on_smoother_update_result.add(std::bind(&InteractiveViewer::globalmap_on_smoother_update_result, this, _1, _2));
+  GlobalMappingCallbacks::on_graph_edit_state_changed.add(std::bind(&InteractiveViewer::globalmap_on_graph_edit_state_changed, this, _1, _2));
 
   thread = std::thread([this] { viewer_loop(); });
 }
@@ -152,6 +165,15 @@ void InteractiveViewer::viewer_loop() {
       return false;
     }
 
+    for (const auto* prefix : {"submap_", "coord_", "sphere_"}) {
+      if (starts_with(name, prefix)) {
+        const int submap_id = std::stoi(name.substr(std::char_traits<char>::length(prefix)));
+        if (is_unavailable_submap(submap_id) || (hide_selected_submaps && is_selected_for_pruning(submap_id))) {
+          return false;
+        }
+      }
+    }
+
     return true;
   });
 
@@ -205,6 +227,13 @@ void InteractiveViewer::drawable_selection() {
       ImGui::EndTooltip();
     }
     return false;
+  };
+  const auto show_disabled_reason = [](const char* text) {
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+      ImGui::BeginTooltip();
+      ImGui::TextUnformatted(text);
+      ImGui::EndTooltip();
+    }
   };
 
   std::vector<const char*> color_modes = {"RAINBOW", "INTENSITY", "SESSION"};
@@ -276,79 +305,252 @@ void InteractiveViewer::drawable_selection() {
   ImGui::DragFloat("Min overlap", &min_overlap, 0.01f, 0.01f, 1.0f);
   show_note("Minimum overlap ratio for finding overlapping submaps.");
 
-  if (needs_session_merge) {
-    ImGui::BeginDisabled();
-  }
+  const GraphEditState edit_state = current_graph_edit_state.load();
+  const bool merge_pending = edit_state == GraphEditState::SESSION_MERGE_PENDING || needs_session_merge.load();
+  const bool graph_editing = edit_state != GraphEditState::IDLE || needs_session_merge.load();
 
+  ImGui::BeginDisabled(merge_pending);
   if (ImGui::Button("Find overlapping submaps") || show_note("Find overlapping submaps and create matching cost factors between them.")) {
     logger->info("finding overlapping submaps...");
     GlobalMappingCallbacks::request_to_find_overlapping_submaps(min_overlap);
   }
+  if (merge_pending) {
+    show_disabled_reason("Create the session merge candidate first.");
+  }
+  ImGui::EndDisabled();
 
+  ImGui::BeginDisabled(graph_editing);
   if (ImGui::Button("Recover graph") || show_note("Detect and fix corrupted graph.")) {
     logger->info("recovering graph...");
     GlobalMappingCallbacks::request_to_recover();
   }
-
-  if (needs_session_merge) {
-    ImGui::EndDisabled();
+  if (graph_editing) {
+    show_disabled_reason("Recover graph is unavailable while graph editing is in progress.");
   }
+  ImGui::EndDisabled();
 
-  if (submaps.size() && needs_session_merge) {
-    if (ImGui::Button("Merge sessions") || show_note("Merge the lastly loaded session with the previous session.")) {
-      logger->info("merging sessions...");
-      if (submaps.empty()) {
-        logger->warn("No submaps");
-      } else if (submaps.front()->session_id == submaps.back()->session_id) {
-        logger->warn("There is only one session");
-      } else {
-        const int source_session_id = submaps.back()->session_id;
-        const auto source_begin = std::find_if(submaps.begin(), submaps.end(), [=](const SubMap::ConstPtr& submap) { return submap->session_id == source_session_id; });
+  if (edit_state == GraphEditState::SESSION_MERGE_PENDING && !submaps.empty()) {
+    ImGui::Separator();
+    ImGui::TextUnformatted("Pending session merge");
 
-        const std::vector<SubMap::ConstPtr> target_submaps(submaps.begin(), source_begin);
-        const std::vector<SubMap::ConstPtr> source_submaps(source_begin, submaps.end());
+    ImGui::BeginDisabled(session_merge_in_progress);
+    if (ImGui::Button("Select submaps to prune...")) {
+      prune_selection_mode = true;
+    }
 
-        logger->info("|submaps|={} |targets|={} |sources|={} source_session_id={}", submaps.size(), target_submaps.size(), source_submaps.size(), source_session_id);
-        manual_loop_close_modal->set_submaps(target_submaps, source_submaps);
-      }
-
-      std::vector<SubMap::ConstPtr> target_submaps;
-      std::vector<SubMap::ConstPtr> source_submaps;
-      for (const auto& submap : submaps) {
-        if (target_submaps.empty()) {
-          target_submaps.emplace_back(submap);
-          continue;
-        }
-        if (target_submaps.back()->session_id == submap->session_id) {
-          target_submaps.emplace_back(submap);
-          continue;
+    if (prune_selection_mode) {
+      ImGui::TextUnformatted("Selection mode: right-click a target sphere or enter IDs.");
+      ImGui::InputInt("Start submap ID", &prune_start_input);
+      ImGui::InputInt("End submap ID", &prune_end_input);
+      if (ImGui::Button("Add prune range")) {
+        if (add_prune_range(prune_start_input, prune_end_input)) {
+          prune_range_start = -1;
+          prune_range_end = -1;
+          update_viewer();
         }
       }
+
+      if (!requested_prune_ranges.empty()) {
+        ImGui::TextUnformatted("Requested prune ranges:");
+      }
+      bool ranges_changed = false;
+      for (int i = 0; i < requested_prune_ranges.size(); i++) {
+        ImGui::PushID(i);
+        int endpoints[2] = {requested_prune_ranges[i].first, requested_prune_ranges[i].last};
+        ImGui::SetNextItemWidth(180.0f);
+        if (ImGui::InputInt2("##prune_range", endpoints)) {
+          if (is_prune_endpoint(endpoints[0]) && is_prune_endpoint(endpoints[1]) && submaps[endpoints[0]]->session_id == submaps[endpoints[1]]->session_id) {
+            if (endpoints[0] > endpoints[1]) {
+              std::swap(endpoints[0], endpoints[1]);
+            }
+            requested_prune_ranges[i] = {endpoints[0], endpoints[1]};
+            ranges_changed = true;
+          } else {
+            logger->warn("invalid prune range [{}, {}]", endpoints[0], endpoints[1]);
+          }
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Remove")) {
+          requested_prune_ranges.erase(requested_prune_ranges.begin() + i);
+          ranges_changed = true;
+          i--;
+        }
+        ImGui::PopID();
+      }
+      if (ranges_changed) {
+        normalize_requested_prune_ranges();
+        update_viewer();
+      }
+
+      if (ImGui::Checkbox("Hide selected submaps", &hide_selected_submaps)) {
+        update_viewer();
+      }
+    }
+
+    ImGui::Checkbox("Ensure connected graph", &ensure_connected_graph);
+    ImGui::DragFloat("Rotation sigma (deg)", &bridge_rotation_sigma_deg, 0.1f, 0.1f, 180.0f);
+    ImGui::DragFloat("Translation sigma (m)", &bridge_translation_sigma, 0.01f, 0.01f, 100.0f);
+
+    if (ImGui::Button("Merge sessions") || show_note("Align and merge the lastly loaded session with the active graph.")) {
+      begin_session_merge();
+    }
+    ImGui::EndDisabled();
+
+    if (session_merge_in_progress) {
+      ImGui::TextUnformatted("Session alignment is in progress. Cancel it in the alignment dialog.");
     }
   }
 
-  if (needs_session_merge) {
-    ImGui::BeginDisabled();
-  }
-
+  ImGui::BeginDisabled(graph_editing);
   if (ImGui::Button("Optimize")) {
     logger->info("optimizing...");
     GlobalMappingCallbacks::request_to_optimize();
   }
-  show_note("Optimize the graph.");
+  if (graph_editing) {
+    show_disabled_reason("Optimize is unavailable while graph editing is in progress.");
+  } else {
+    show_note("Optimize the graph.");
+  }
 
   ImGui::SameLine();
   ImGui::Checkbox("##Cont optimize", &cont_optimize);
-  if (cont_optimize) {
+  if (graph_editing) {
+    cont_optimize = false;
+  } else if (cont_optimize) {
     GlobalMappingCallbacks::request_to_optimize();
   }
-  show_note("Continuously optimize the graph.");
-
-  if (needs_session_merge) {
-    ImGui::EndDisabled();
+  if (graph_editing) {
+    show_disabled_reason("Continuous optimization is unavailable while graph editing is in progress.");
+  } else {
+    show_note("Continuously optimize the graph.");
   }
+  ImGui::EndDisabled();
 
   ImGui::End();
+}
+
+bool InteractiveViewer::is_prune_endpoint(int submap_id) const {
+  if (submap_id < 0 || submap_id >= submaps.size() || submaps.empty()) {
+    return false;
+  }
+  if (submaps[submap_id]->session_id == submaps.back()->session_id) {
+    return false;
+  }
+  return !is_unavailable_submap(submap_id);
+}
+
+bool InteractiveViewer::is_unavailable_submap(int submap_id) const {
+  return submap_id >= 0 && submap_id < unavailable_submap_mask.size() && unavailable_submap_mask[submap_id];
+}
+
+bool InteractiveViewer::is_selected_for_pruning(int submap_id) const {
+  return std::any_of(requested_prune_ranges.begin(), requested_prune_ranges.end(), [=](const SubmapRange& range) { return range.first <= submap_id && submap_id <= range.last; });
+}
+
+void InteractiveViewer::normalize_requested_prune_ranges() {
+  std::sort(requested_prune_ranges.begin(), requested_prune_ranges.end(), [](const auto& lhs, const auto& rhs) { return lhs.first < rhs.first; });
+
+  std::vector<SubmapRange> normalized;
+  for (const auto& range : requested_prune_ranges) {
+    const bool same_session = !normalized.empty() && submaps[normalized.back().first]->session_id == submaps[range.first]->session_id;
+    if (!same_session || range.first > normalized.back().last + 1) {
+      normalized.push_back(range);
+    } else {
+      normalized.back().last = std::max(normalized.back().last, range.last);
+    }
+  }
+  requested_prune_ranges = std::move(normalized);
+}
+
+bool InteractiveViewer::add_prune_range(int first, int last) {
+  if (!is_prune_endpoint(first) || !is_prune_endpoint(last)) {
+    logger->warn("prune range endpoints must be active target submaps");
+    return false;
+  }
+  if (submaps[first]->session_id != submaps[last]->session_id) {
+    logger->warn("prune range endpoints must belong to the same target session");
+    return false;
+  }
+
+  if (first > last) {
+    std::swap(first, last);
+  }
+
+  requested_prune_ranges.push_back({first, last});
+  normalize_requested_prune_ranges();
+  return true;
+}
+
+void InteractiveViewer::set_prune_endpoint(int submap_id, bool start) {
+  if (!is_prune_endpoint(submap_id)) {
+    logger->warn("submap {} cannot be used as a prune range endpoint", submap_id);
+    return;
+  }
+
+  if (start) {
+    prune_range_start = submap_id;
+    prune_start_input = submap_id;
+  } else {
+    prune_range_end = submap_id;
+    prune_end_input = submap_id;
+  }
+
+  if (prune_range_start >= 0 && prune_range_end >= 0 && add_prune_range(prune_range_start, prune_range_end)) {
+    prune_range_start = -1;
+    prune_range_end = -1;
+    update_viewer();
+  }
+}
+
+void InteractiveViewer::begin_session_merge() {
+  if (current_graph_edit_state != GraphEditState::SESSION_MERGE_PENDING || submaps.empty()) {
+    return;
+  }
+
+  const int source_session_id = submaps.back()->session_id;
+  std::vector<SubMap::ConstPtr> target_submaps;
+  std::vector<SubMap::ConstPtr> source_submaps;
+  // Preprocess exactly the submaps that will remain in the merge candidate.
+  for (const auto& submap : submaps) {
+    const bool unavailable = is_unavailable_submap(submap->id);
+    if (submap->session_id == source_session_id) {
+      if (!unavailable) {
+        source_submaps.push_back(submap);
+      }
+    } else if (!unavailable && !is_selected_for_pruning(submap->id)) {
+      target_submaps.push_back(submap);
+    }
+  }
+
+  if (target_submaps.empty() || source_submaps.empty()) {
+    logger->warn("session merge requires active target and source submaps");
+    return;
+  }
+
+  constexpr double DEG_TO_RAD = 3.14159265358979323846 / 180.0;
+  pending_merge_options = std::make_unique<SessionMergeOptions>();
+  pending_merge_options->prune_ranges = requested_prune_ranges;
+  pending_merge_options->ensure_connected_graph = ensure_connected_graph;
+  pending_merge_options->bridge_rotation_sigma = bridge_rotation_sigma_deg * DEG_TO_RAD;
+  pending_merge_options->bridge_translation_sigma = bridge_translation_sigma;
+
+  prune_selection_mode = false;
+  session_merge_in_progress = true;
+  logger->info("aligning sessions with {} target and {} source submaps", target_submaps.size(), source_submaps.size());
+  manual_loop_close_modal->set_submaps(target_submaps, source_submaps);
+}
+
+void InteractiveViewer::reset_graph_edit_ui() {
+  requested_prune_ranges.clear();
+  prune_range_start = -1;
+  prune_range_end = -1;
+  prune_start_input = 0;
+  prune_end_input = 0;
+  prune_selection_mode = false;
+  hide_selected_submaps = false;
+  ensure_connected_graph = true;
+  session_merge_in_progress = false;
+  pending_merge_options.reset();
 }
 
 /**
@@ -381,16 +583,29 @@ void InteractiveViewer::context_menu() {
     if (type == PickType::FRAME) {
       const int frame_id = right_clicked_info[3];
       ImGui::TextUnformatted(("Submap ID : " + std::to_string(frame_id)).c_str());
-      if (ImGui::MenuItem("Loop begin", nullptr, manual_loop_close_modal->is_target_set())) {
-        manual_loop_close_modal->set_target(X(frame_id), submaps[frame_id]->frame, submap_poses[frame_id]);
-      }
-      if (ImGui::MenuItem("Loop end", nullptr, manual_loop_close_modal->is_source_set())) {
-        manual_loop_close_modal->set_source(X(frame_id), submaps[frame_id]->frame, submap_poses[frame_id]);
+      if (prune_selection_mode) {
+        const bool valid_endpoint = is_prune_endpoint(frame_id);
+        if (ImGui::MenuItem("Set prune range start", nullptr, false, valid_endpoint)) {
+          set_prune_endpoint(frame_id, true);
+        }
+        if (ImGui::MenuItem("Set prune range end", nullptr, false, valid_endpoint)) {
+          set_prune_endpoint(frame_id, false);
+        }
+      } else {
+        const bool accepts_graph_factors = current_graph_edit_state.load() != GraphEditState::SESSION_MERGE_PENDING && !needs_session_merge.load();
+        const bool active = accepts_graph_factors && !is_unavailable_submap(frame_id);
+        if (ImGui::MenuItem("Loop begin", nullptr, manual_loop_close_modal->is_target_set(), active)) {
+          manual_loop_close_modal->set_target(X(frame_id), submaps[frame_id]->frame, submap_poses[frame_id]);
+        }
+        if (ImGui::MenuItem("Loop end", nullptr, manual_loop_close_modal->is_source_set(), active)) {
+          manual_loop_close_modal->set_source(X(frame_id), submaps[frame_id]->frame, submap_poses[frame_id]);
+        }
       }
     }
 
     if (type == PickType::POINTS) {
-      if (ImGui::MenuItem("Bundle adjustment (Plane)")) {
+      const bool accepts_graph_factors = current_graph_edit_state.load() != GraphEditState::SESSION_MERGE_PENDING && !needs_session_merge.load();
+      if (ImGui::MenuItem("Bundle adjustment (Plane)", nullptr, false, accepts_graph_factors)) {
         bundle_adjustment_modal->set_frames(submaps, submap_poses, right_clicked_pos.cast<double>());
       }
     }
@@ -406,14 +621,21 @@ void InteractiveViewer::run_modals() {
   std::vector<gtsam::NonlinearFactor::shared_ptr> factors;
 
   auto manual_loop_close_factor = manual_loop_close_modal->run();
-  if (manual_loop_close_factor && needs_session_merge) {
-    SessionMergeOptions options;
-    options.merge_factor = manual_loop_close_factor;
+  const bool alignment_cancelled = manual_loop_close_modal->consume_cancelled();
+  if (alignment_cancelled && session_merge_in_progress) {
+    pending_merge_options.reset();
+    session_merge_in_progress = false;
+    prune_selection_mode = false;
+    logger->info("session merge alignment cancelled");
+  }
+
+  if (manual_loop_close_factor && pending_merge_options) {
+    pending_merge_options->merge_factor = manual_loop_close_factor;
 
     const auto& keys = manual_loop_close_factor->keys();
     global_factors.emplace_back(FactorType::BETWEEN, keys[0], keys[1]);
-    needs_session_merge = false;
-    GlobalMappingCallbacks::request_to_merge_sessions(options);
+    GlobalMappingCallbacks::request_to_merge_sessions(*pending_merge_options);
+    pending_merge_options.reset();
   } else {
     factors.push_back(manual_loop_close_factor);
   }
@@ -438,6 +660,8 @@ void InteractiveViewer::update_viewer() {
   for (int i = 0; i < submaps.size(); i++) {
     const auto& submap = submaps[i];
     const Eigen::Affine3f submap_pose = submap_poses[i].cast<float>();
+    const Eigen::Vector4f session_color = glk::colormap_categoricalf(glk::COLORMAP::TURBO, submap->session_id, 6);
+    const bool selected_for_pruning = is_selected_for_pruning(submap->id);
 
     auto_z_range[0] = std::min(auto_z_range[0], submap_pose.translation().z());
     auto_z_range[1] = std::max(auto_z_range[1], submap_pose.translation().z());
@@ -445,21 +669,24 @@ void InteractiveViewer::update_viewer() {
     auto drawable = viewer->find_drawable("submap_" + std::to_string(submap->id));
     if (drawable.first) {
       drawable.first->add("model_matrix", submap_pose.matrix());
+      drawable.first->set_color(selected_for_pruning ? Eigen::Vector4f(1.0f, 0.6f, 0.0f, points_alpha) : session_color);
 
-      switch (color_mode) {
-        case 0:
-          drawable.first->set_color_mode(guik::ColorMode::RAINBOW);
-          break;
-        case 1:
-          drawable.first->set_color_mode(guik::ColorMode::VERTEX_COLOR);
-          break;
-        case 2:
-          drawable.first->set_color_mode(guik::ColorMode::FLAT_COLOR);
-          break;
+      if (selected_for_pruning) {
+        drawable.first->set_color_mode(guik::ColorMode::FLAT_COLOR);
+      } else {
+        switch (color_mode) {
+          case 0:
+            drawable.first->set_color_mode(guik::ColorMode::RAINBOW);
+            break;
+          case 1:
+            drawable.first->set_color_mode(guik::ColorMode::VERTEX_COLOR);
+            break;
+          case 2:
+            drawable.first->set_color_mode(guik::ColorMode::FLAT_COLOR);
+            break;
+        }
       }
     } else {
-      const Eigen::Vector4f color = glk::colormap_categoricalf(glk::COLORMAP::TURBO, submap->session_id, 6);
-
       const Eigen::Vector4i info(static_cast<int>(PickType::POINTS), 0, 0, submap->id);
       auto cloud_buffer = std::make_shared<glk::PointCloudBuffer>(submap->frame->points, submap->frame->size());
 
@@ -471,7 +698,13 @@ void InteractiveViewer::update_viewer() {
           1.0 / *std::max_element(submap->frame->intensities, submap->frame->intensities + submap->frame->size()));
       }
 
-      auto shader_setting = guik::Rainbow(submap_pose).add("info_values", info).set_color(color).set_alpha(points_alpha);
+      auto shader_setting = guik::Rainbow(submap_pose)
+                              .add("info_values", info)
+                              .set_color(selected_for_pruning ? Eigen::Vector4f(1.0f, 0.6f, 0.0f, points_alpha) : session_color)
+                              .set_alpha(points_alpha);
+      if (selected_for_pruning) {
+        shader_setting.set_color_mode(guik::ColorMode::FLAT_COLOR);
+      }
 
       if (enable_partial_rendering) {
         cloud_buffer->enable_partial_rendering(partial_rendering_budget);
@@ -491,7 +724,11 @@ void InteractiveViewer::update_viewer() {
     viewer->update_drawable(
       "sphere_" + std::to_string(submap->id),
       glk::Primitives::sphere(),
-      guik::FlatColor(1.0f, 0.0f, 0.0f, 0.5f, submap_pose * Eigen::UniformScaling<float>(sphere_scale)).add("info_values", info).make_transparent());
+      guik::FlatColor(
+        selected_for_pruning ? Eigen::Vector4f(1.0f, 0.6f, 0.0f, 0.7f) : Eigen::Vector4f(1.0f, 0.0f, 0.0f, 0.5f),
+        submap_pose * Eigen::UniformScaling<float>(sphere_scale))
+        .add("info_values", info)
+        .make_transparent());
   }
 
   viewer->shader_setting().add<Eigen::Vector2f>("z_range", z_range + auto_z_range);
@@ -639,6 +876,21 @@ void InteractiveViewer::globalmap_on_smoother_update_result(gtsam_points::ISAM2E
   logger->info("--- smoother_updated ---\n{}", text);
 }
 
+void InteractiveViewer::globalmap_on_graph_edit_state_changed(GraphEditState state, const std::vector<uint8_t>& pruned_mask) {
+  const GraphEditState previous = current_graph_edit_state.exchange(state);
+  needs_session_merge = state == GraphEditState::SESSION_MERGE_PENDING;
+
+  invoke([this, state, previous, pruned_mask] {
+    unavailable_submap_mask = pruned_mask;
+    if (state == GraphEditState::IDLE && previous != GraphEditState::IDLE) {
+      reset_graph_edit_ui();
+    } else if (state == GraphEditState::SESSION_MERGE_PENDING || state == GraphEditState::CANDIDATE_EDITING) {
+      session_merge_in_progress = false;
+    }
+    update_viewer();
+  });
+}
+
 bool InteractiveViewer::ok() const {
   return !request_to_terminate;
 }
@@ -666,6 +918,10 @@ void InteractiveViewer::clear() {
   submaps.clear();
   submap_poses.clear();
   global_factors.clear();
+  unavailable_submap_mask.clear();
+  current_graph_edit_state = GraphEditState::IDLE;
+  needs_session_merge = false;
+  reset_graph_edit_ui();
 
   guik::LightViewer::instance()->clear_drawables();
 }

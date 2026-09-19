@@ -90,6 +90,19 @@ void test_v1_round_trip() {
 
   std::ostringstream output;
   glim::write_graph_metadata(output, input);
+  const std::string expected =
+    "graph_metadata_version: 1\n"
+    "num_submaps: 10\n"
+    "num_all_frames: 80\n"
+    "num_active_frames: 55\n"
+    "num_pruned_submaps: 3\n"
+    "num_pruned_ranges: 2\n"
+    "pruned_range 2 3\n"
+    "pruned_range 7 7\n"
+    "num_matching_cost_factors: 2\n"
+    "matching_cost vgicp 0 1\n"
+    "matching_cost vgicp_gpu 4 9\n";
+  expect(output.str() == expected, "v1 metadata records were not written in canonical order");
   const auto parsed = parse(output.str());
 
   expect(parsed.version == 1, "v1 metadata version is incorrect");

@@ -177,6 +177,11 @@ if(BUILD_TESTING)
   target_include_directories(graph_edit_test PRIVATE include)
   target_link_libraries(graph_edit_test PRIVATE gtsam gtsam_points::gtsam_points)
   add_test(NAME graph_edit_test COMMAND graph_edit_test)
+
+  add_executable(async_global_mapping_test test/async_global_mapping_test.cpp)
+  target_link_libraries(async_global_mapping_test PRIVATE glim)
+  add_test(NAME async_global_mapping_test COMMAND async_global_mapping_test)
+  set_tests_properties(async_global_mapping_test PROPERTIES ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_CURRENT_BINARY_DIR}:$ENV{LD_LIBRARY_PATH}")
 endif()
 
 

@@ -339,12 +339,12 @@ void write_graph_metadata(std::ostream& stream, const GraphMetadata& metadata) {
   stream << "num_submaps: " << metadata.num_submaps << '\n';
   stream << "num_all_frames: " << metadata.num_all_frames << '\n';
   stream << "num_active_frames: " << metadata.num_active_frames << '\n';
-  stream << "num_matching_cost_factors: " << metadata.matching_cost_factors.size() << '\n';
   stream << "num_pruned_submaps: " << count_submaps(pruned_ranges) << '\n';
   stream << "num_pruned_ranges: " << pruned_ranges.size() << '\n';
   for (const auto& range : pruned_ranges) {
     stream << "pruned_range " << range.first << ' ' << range.last << '\n';
   }
+  stream << "num_matching_cost_factors: " << metadata.matching_cost_factors.size() << '\n';
   for (const auto& factor : metadata.matching_cost_factors) {
     stream << "matching_cost " << factor.type << ' ' << factor.first << ' ' << factor.second << '\n';
   }

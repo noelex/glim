@@ -10,6 +10,7 @@
 #include <Eigen/Geometry>
 
 #include <glim/mapping/sub_map.hpp>
+#include <glim/mapping/graph_edit.hpp>
 #include <glim/util/extension_module.hpp>
 #include <gtsam_points/util/gtsam_migration.hpp>
 
@@ -67,6 +68,16 @@ protected:
   void globalmap_on_update_submaps(const std::vector<SubMap::Ptr>& updated_submaps);
   void globalmap_on_smoother_update(gtsam_points::ISAM2Ext& isam2, gtsam::NonlinearFactorGraph& new_factors, gtsam::Values& new_values);
   void globalmap_on_smoother_update_result(gtsam_points::ISAM2Ext& isam2, const gtsam_points::ISAM2ResultExt& result);
+  void globalmap_on_graph_edit_state_changed(GraphEditState state, const std::vector<uint8_t>& pruned_mask);
+
+  bool add_prune_range(int first, int last);
+  void normalize_requested_prune_ranges();
+  bool is_prune_endpoint(int submap_id) const;
+  bool is_unavailable_submap(int submap_id) const;
+  bool is_selected_for_pruning(int submap_id) const;
+  void set_prune_endpoint(int submap_id, bool start);
+  void begin_session_merge();
+  void reset_graph_edit_ui();
 
 protected:
   std::atomic_bool request_to_clear;
@@ -109,6 +120,21 @@ protected:
   double factors_alpha;
 
   std::atomic_bool needs_session_merge;
+  std::atomic<GraphEditState> current_graph_edit_state;
+
+  bool prune_selection_mode;
+  bool hide_selected_submaps;
+  bool ensure_connected_graph;
+  bool session_merge_in_progress;
+  int prune_range_start;
+  int prune_range_end;
+  int prune_start_input;
+  int prune_end_input;
+  float bridge_rotation_sigma_deg;
+  float bridge_translation_sigma;
+  std::vector<SubmapRange> requested_prune_ranges;
+  std::vector<uint8_t> unavailable_submap_mask;
+  std::unique_ptr<SessionMergeOptions> pending_merge_options;
 
   // Click information
   Eigen::Vector4i right_clicked_info;
