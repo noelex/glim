@@ -3,6 +3,7 @@
 #include <atomic>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -70,6 +71,7 @@ protected:
   void globalmap_on_smoother_update(gtsam_points::ISAM2Ext& isam2, gtsam::NonlinearFactorGraph& new_factors, gtsam::Values& new_values);
   void globalmap_on_smoother_update_result(gtsam_points::ISAM2Ext& isam2, const gtsam_points::ISAM2ResultExt& result);
   void globalmap_on_graph_edit_state_changed(GraphEditState state, const std::vector<uint8_t>& pruned_mask);
+  void globalmap_on_candidate_graph_updated(const CandidateGraph& candidate);
 
   bool add_prune_range(int first, int last);
   void normalize_requested_prune_ranges();
@@ -126,6 +128,7 @@ protected:
   bool prune_selection_mode;
   bool show_submap_pruning_window;
   bool hide_selected_submaps;
+  bool hide_additional_session;
   bool ensure_connected_graph;
   bool session_merge_in_progress;
   int prune_range_start;
@@ -137,6 +140,8 @@ protected:
   std::vector<SubmapRange> requested_prune_ranges;
   std::vector<uint8_t> unavailable_submap_mask;
   std::unique_ptr<SessionMergeOptions> pending_merge_options;
+  std::size_t candidate_component_count;
+  std::string candidate_diagnostic;
 
   // Click information
   Eigen::Vector4i right_clicked_info;

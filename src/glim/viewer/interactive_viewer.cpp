@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <regex>
 #include <thread>
 #include <spdlog/spdlog.h>
 #include <glim/mapping/sub_map.hpp>
@@ -38,6 +39,33 @@
 namespace glim {
 using gtsam::symbol_shorthand::X;
 
+namespace {
+
+std::vector<std::tuple<InteractiveViewer::FactorType, std::uint64_t, std::uint64_t>> extract_display_factors(const gtsam::NonlinearFactorGraph& factors) {
+  std::vector<std::tuple<InteractiveViewer::FactorType, std::uint64_t, std::uint64_t>> display_factors;
+
+  for (const auto& factor : factors) {
+    if (dynamic_cast<gtsam::BetweenFactor<gtsam::Pose3>*>(factor.get())) {
+      display_factors.emplace_back(InteractiveViewer::FactorType::BETWEEN, factor->keys()[0], factor->keys()[1]);
+    }
+    if (dynamic_cast<gtsam_points::IntegratedMatchingCostFactor*>(factor.get())) {
+      display_factors.emplace_back(InteractiveViewer::FactorType::MATCHING_COST, factor->keys()[0], factor->keys()[1]);
+    }
+#ifdef GTSAM_POINTS_USE_CUDA
+    if (dynamic_cast<gtsam_points::IntegratedVGICPFactorGPU*>(factor.get())) {
+      display_factors.emplace_back(InteractiveViewer::FactorType::MATCHING_COST, factor->keys()[0], factor->keys()[1]);
+    }
+#endif
+    if (dynamic_cast<gtsam::ImuFactor*>(factor.get())) {
+      display_factors.emplace_back(InteractiveViewer::FactorType::IMU, factor->keys()[0], factor->keys()[2]);
+    }
+  }
+
+  return display_factors;
+}
+
+}  // namespace
+
 InteractiveViewer::InteractiveViewer() : logger(create_module_logger("viewer")) {
   glim::Config config(glim::GlobalConfig::get_config_path("config_viewer"));
 
@@ -69,14 +97,16 @@ InteractiveViewer::InteractiveViewer() : logger(create_module_logger("viewer")) 
   prune_selection_mode = false;
   show_submap_pruning_window = false;
   hide_selected_submaps = false;
+  hide_additional_session = true;
   ensure_connected_graph = true;
   session_merge_in_progress = false;
   prune_range_start = -1;
   prune_range_end = -1;
   prune_start_input = 0;
   prune_end_input = 0;
-  bridge_rotation_sigma_deg = 5.0f;
-  bridge_translation_sigma = 0.5f;
+  bridge_rotation_sigma_deg = 1.0f;
+  bridge_translation_sigma = 0.05f;
+  candidate_component_count = 0;
 
   enable_partial_rendering = config.param("interactive_viewer", "enable_partial_rendering", false);
   partial_rendering_budget = config.param("interactive_viewer", "partial_rendering_budget", 1024);
@@ -102,6 +132,7 @@ InteractiveViewer::InteractiveViewer() : logger(create_module_logger("viewer")) 
   GlobalMappingCallbacks::on_smoother_update.add(std::bind(&InteractiveViewer::globalmap_on_smoother_update, this, _1, _2, _3));
   GlobalMappingCallbacks::on_smoother_update_result.add(std::bind(&InteractiveViewer::globalmap_on_smoother_update_result, this, _1, _2));
   GlobalMappingCallbacks::on_graph_edit_state_changed.add(std::bind(&InteractiveViewer::globalmap_on_graph_edit_state_changed, this, _1, _2));
+  GlobalMappingCallbacks::on_candidate_graph_updated.add(std::bind(&InteractiveViewer::globalmap_on_candidate_graph_updated, this, _1));
 
   thread = std::thread([this] { viewer_loop(); });
 }
@@ -170,7 +201,9 @@ void InteractiveViewer::viewer_loop() {
     for (const auto* prefix : {"submap_", "coord_", "sphere_"}) {
       if (starts_with(name, prefix)) {
         const int submap_id = std::stoi(name.substr(std::char_traits<char>::length(prefix)));
-        if (is_unavailable_submap(submap_id) || (hide_selected_submaps && is_selected_for_pruning(submap_id))) {
+        const bool additional_session = show_submap_pruning_window && hide_additional_session && current_graph_edit_state.load() == GraphEditState::SESSION_MERGE_PENDING &&
+                                        !submaps.empty() && submaps[submap_id]->session_id == submaps.back()->session_id;
+        if (is_unavailable_submap(submap_id) || (hide_selected_submaps && is_selected_for_pruning(submap_id)) || additional_session) {
           return false;
         }
       }
@@ -344,9 +377,16 @@ void InteractiveViewer::drawable_selection() {
       begin_session_merge();
     }
     ImGui::EndDisabled();
+  }
 
-    if (session_merge_in_progress) {
-      ImGui::TextUnformatted("Session alignment is in progress. Cancel it in the alignment dialog.");
+  if (edit_state == GraphEditState::CANDIDATE_EDITING) {
+    ImGui::Separator();
+    if (candidate_component_count > 1) {
+      ImGui::TextColored(ImVec4(1.0f, 0.65f, 0.0f, 1.0f), "Graph has %zu connected components.", candidate_component_count);
+      ImGui::TextWrapped("Add loop closures or find overlapping submaps to connect the graph.");
+    } else if (!candidate_diagnostic.empty()) {
+      ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "Candidate graph could not be committed.");
+      ImGui::TextWrapped("%s", candidate_diagnostic.c_str());
     }
   }
 
@@ -450,6 +490,7 @@ void InteractiveViewer::draw_submap_pruning_window() {
   if (ImGui::Checkbox("Hide selected submaps", &hide_selected_submaps)) {
     update_viewer();
   }
+  ImGui::Checkbox("Hide newly loaded session", &hide_additional_session);
   ImGui::Text("Selected: %d submaps in %zu ranges", count_submaps(requested_prune_ranges), requested_prune_ranges.size());
 
   ImGui::End();
@@ -579,9 +620,12 @@ void InteractiveViewer::reset_graph_edit_ui() {
   show_submap_pruning_window = false;
   prune_selection_mode = false;
   hide_selected_submaps = false;
+  hide_additional_session = true;
   ensure_connected_graph = true;
   session_merge_in_progress = false;
   pending_merge_options.reset();
+  candidate_component_count = 0;
+  candidate_diagnostic.clear();
 }
 
 /**
@@ -691,6 +735,13 @@ void InteractiveViewer::update_viewer() {
   Eigen::Vector2f auto_z_range(0.0f, 0.0f);
   for (int i = 0; i < submaps.size(); i++) {
     const auto& submap = submaps[i];
+    if (is_unavailable_submap(submap->id)) {
+      viewer->remove_drawable("submap_" + std::to_string(submap->id));
+      viewer->remove_drawable("coord_" + std::to_string(submap->id));
+      viewer->remove_drawable("sphere_" + std::to_string(submap->id));
+      continue;
+    }
+
     const Eigen::Affine3f submap_pose = submap_poses[i].cast<float>();
     const Eigen::Vector4f session_color = glk::colormap_categoricalf(glk::COLORMAP::TURBO, submap->session_id, 6);
     const bool selected_for_pruning = is_selected_for_pruning(submap->id);
@@ -774,14 +825,14 @@ void InteractiveViewer::update_viewer() {
     gtsam::Symbol symbol(key);
     switch (symbol.chr()) {
       case 'x':
-        return submaps[symbol.index()]->T_world_origin.translation();
+        return submap_poses[symbol.index()].translation();
       case 'e': {
         const int right = symbol.index() % 2;
         const int submap_id = (symbol.index() - right) / 2;
 
         const auto& submap = submaps[submap_id];
         const auto& T_origin_endpoint = right ? submap->T_origin_endpoint_R : submap->T_origin_endpoint_L;
-        const Eigen::Isometry3d T_world_endpoint = submap->T_world_origin * T_origin_endpoint;
+        const Eigen::Isometry3d T_world_endpoint = submap_poses[submap_id] * T_origin_endpoint;
 
         return T_world_endpoint.translation();
       }
@@ -815,19 +866,45 @@ void InteractiveViewer::update_viewer() {
 
   viewer->update_drawable("factors", std::make_shared<glk::ThinLines>(factor_lines, factor_colors), guik::VertexColor().set_alpha(factors_alpha));
 
+  viewer->remove_drawable(std::regex("traj.*"));
   std::vector<Eigen::Vector3f> traj;
-  for (const auto& submap : submaps) {
-    const Eigen::Isometry3d T_world_endpoint_L = submap->T_world_origin * submap->T_origin_endpoint_L;
+  int trajectory_segment = 0;
+  int previous_submap_id = -1;
+  int previous_session_id = -1;
+  const auto draw_trajectory_segment = [&] {
+    if (traj.empty()) {
+      return;
+    }
+    auto traj_line = std::make_shared<glk::ThinLines>(traj, true);
+    traj_line->set_line_width(2.0f);
+    viewer->update_drawable("traj_" + std::to_string(trajectory_segment++), traj_line, guik::FlatGreen());
+    traj.clear();
+  };
+
+  for (int i = 0; i < submaps.size(); i++) {
+    const auto& submap = submaps[i];
+    if (is_unavailable_submap(submap->id)) {
+      draw_trajectory_segment();
+      previous_submap_id = -1;
+      previous_session_id = -1;
+      continue;
+    }
+
+    if (previous_submap_id >= 0 && (submap->session_id != previous_session_id || submap->id != previous_submap_id + 1)) {
+      draw_trajectory_segment();
+    }
+
+    const Eigen::Isometry3d T_world_endpoint_L = submap_poses[i] * submap->T_origin_endpoint_L;
     const Eigen::Isometry3d T_odom_imu0 = submap->frames.front()->T_world_imu;
     for (const auto& frame : submap->frames) {
       const Eigen::Isometry3d T_world_imu = T_world_endpoint_L * T_odom_imu0.inverse() * frame->T_world_imu;
       traj.emplace_back(T_world_imu.translation().cast<float>());
     }
-  }
 
-  auto traj_line = std::make_shared<glk::ThinLines>(traj, true);
-  traj_line->set_line_width(2.0f);
-  viewer->update_drawable("traj", traj_line, guik::FlatGreen());
+    previous_submap_id = submap->id;
+    previous_session_id = submap->session_id;
+  }
+  draw_trajectory_segment();
 }
 
 void InteractiveViewer::odometry_on_new_frame(const EstimationFrame::ConstPtr& new_frame) {
@@ -878,25 +955,7 @@ void InteractiveViewer::globalmap_on_update_submaps(const std::vector<SubMap::Pt
  * @brief Smoother update callback
  */
 void InteractiveViewer::globalmap_on_smoother_update(gtsam_points::ISAM2Ext& isam2, gtsam::NonlinearFactorGraph& new_factors, gtsam::Values& new_values) {
-  std::vector<std::tuple<FactorType, gtsam::Key, gtsam::Key>> inserted_factors;
-
-  for (const auto& factor : new_factors) {
-    if (dynamic_cast<gtsam::BetweenFactor<gtsam::Pose3>*>(factor.get())) {
-      inserted_factors.push_back(std::make_tuple(FactorType::BETWEEN, factor->keys()[0], factor->keys()[1]));
-    }
-    if (dynamic_cast<gtsam_points::IntegratedMatchingCostFactor*>(factor.get())) {
-      inserted_factors.push_back(std::make_tuple(FactorType::MATCHING_COST, factor->keys()[0], factor->keys()[1]));
-    }
-#ifdef GTSAM_POINTS_USE_CUDA
-    if (dynamic_cast<gtsam_points::IntegratedVGICPFactorGPU*>(factor.get())) {
-      inserted_factors.push_back(std::make_tuple(FactorType::MATCHING_COST, factor->keys()[0], factor->keys()[1]));
-    }
-#endif
-    if (dynamic_cast<gtsam::ImuFactor*>(factor.get())) {
-      inserted_factors.push_back(std::make_tuple(FactorType::IMU, factor->keys()[0], factor->keys()[2]));
-    }
-  }
-
+  const auto inserted_factors = extract_display_factors(new_factors);
   invoke([this, inserted_factors] { global_factors.insert(global_factors.end(), inserted_factors.begin(), inserted_factors.end()); });
 }
 
@@ -919,6 +978,29 @@ void InteractiveViewer::globalmap_on_graph_edit_state_changed(GraphEditState sta
     } else if (state == GraphEditState::SESSION_MERGE_PENDING || state == GraphEditState::CANDIDATE_EDITING) {
       session_merge_in_progress = false;
     }
+    update_viewer();
+  });
+}
+
+void InteractiveViewer::globalmap_on_candidate_graph_updated(const CandidateGraph& candidate) {
+  std::vector<std::pair<int, Eigen::Isometry3d>> poses;
+  for (const auto& value : candidate.values) {
+    const gtsam::Symbol symbol(value.key);
+    if (symbol.chr() == 'x') {
+      poses.emplace_back(symbol.index(), Eigen::Isometry3d(value.value.cast<gtsam::Pose3>().matrix()));
+    }
+  }
+
+  const auto factors = extract_display_factors(candidate.factors);
+  const std::size_t component_count = candidate.connectivity.pose_component_count;
+  const std::string diagnostic = candidate.diagnostic;
+  invoke([this, poses, factors, component_count, diagnostic] {
+    for (const auto& [id, pose] : poses) {
+      submap_poses[id] = pose;
+    }
+    global_factors = factors;
+    candidate_component_count = component_count;
+    candidate_diagnostic = diagnostic;
     update_viewer();
   });
 }

@@ -1,5 +1,6 @@
 #include <glim/mapping/graph_edit.hpp>
 
+#include <cmath>
 #include <functional>
 #include <iostream>
 #include <stdexcept>
@@ -297,6 +298,9 @@ void test_merge_candidate() {
   const auto connected = glim::build_session_merge_candidate(target_factors, target_values, source_factors, source_values, 3, 5, options);
   expect(connected.connectivity.all_poses_reachable(), "soft bridges failed to connect all candidate poses");
   expect(connected.factors.size() == 4, "soft bridging must add exactly one factor per disconnected target component");
+  expect(connected.bridges.size() == 1, "soft bridge information is missing");
+  expect(connected.bridges[0].source_id == 4 && connected.bridges[0].target_id == 2, "soft bridge information contains incorrect submap IDs");
+  expect(std::abs(connected.bridges[0].distance - 14.0) < 1e-9, "soft bridge information contains an incorrect distance");
   const auto bridge_factor = dynamic_cast<const gtsam::BetweenFactor<gtsam::Pose3>*>(connected.factors.back().get());
   expect(bridge_factor && bridge_factor->key1() == X(4) && bridge_factor->key2() == X(2), "soft bridging did not select the nearest source-to-target pair");
   const auto trial_build = glim::build_trial_isam2(connected.factors, connected.values, gtsam::ISAM2Params());
@@ -305,6 +309,7 @@ void test_merge_candidate() {
   options.prune_ranges.clear();
   const auto ordinary_merge = glim::build_session_merge_candidate(target_factors, target_values, source_factors, source_values, 3, 5, options);
   expect(ordinary_merge.connectivity.all_poses_reachable(), "ordinary merge without pruning must remain connected");
+  expect(ordinary_merge.bridges.empty(), "ordinary connected merge recorded an unexpected soft bridge");
   expect(ordinary_merge.values.size() == target_values.size() + source_values.size(), "ordinary merge lost values");
   expect(ordinary_merge.factors.size() == target_factors.size() + source_factors.size() + 1, "ordinary merge added unexpected factors");
 

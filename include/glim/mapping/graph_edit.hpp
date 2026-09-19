@@ -170,9 +170,18 @@ struct SessionMergeOptions {
   gtsam::NonlinearFactor::shared_ptr merge_factor;  ///< User-confirmed target-to-source merge factor
   std::vector<SubmapRange> prune_ranges;            ///< Target submap ranges to prune
 
-  bool ensure_connected_graph = true;                  ///< Add soft bridge factors when needed
-  double bridge_rotation_sigma = 0.08726646259971647;  ///< Soft bridge rotation sigma in radians
-  double bridge_translation_sigma = 0.5;               ///< Soft bridge translation sigma in meters
+  bool ensure_connected_graph = true;                   ///< Add soft bridge factors when needed
+  double bridge_rotation_sigma = 0.017453292519943295;  ///< Soft bridge rotation sigma in radians
+  double bridge_translation_sigma = 0.05;               ///< Soft bridge translation sigma in meters
+};
+
+/**
+ * @brief Automatically generated soft bridge information
+ */
+struct BridgeFactorInfo {
+  int source_id;    ///< Source session submap ID
+  int target_id;    ///< Target session submap ID
+  double distance;  ///< Distance between submap origins in meters
 };
 
 /**
@@ -184,6 +193,7 @@ struct CandidateGraph {
 
   std::vector<SubmapRange> requested_prune_ranges;
   std::vector<SubmapRange> applied_prune_ranges;
+  std::vector<BridgeFactorInfo> bridges;
 
   GraphConnectivity connectivity;
 

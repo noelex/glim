@@ -1,6 +1,7 @@
 #include <glim/mapping/graph_edit.hpp>
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 #include <map>
 #include <set>
@@ -399,6 +400,7 @@ CandidateGraph build_session_merge_candidate(
         gtsam::Symbol('x', best_target),
         source_pose_global.between(target_pose_global),
         noise);
+      candidate.bridges.push_back({best_source, best_target, std::sqrt(best_squared_distance)});
     }
 
     candidate.connectivity = analyze_graph_connectivity(candidate.values, candidate.factors, anchor.key);

@@ -26,6 +26,7 @@ class LevenbergMarquardtOptimizationStatus;
 namespace glim {
 
 enum class GraphEditState;
+struct CandidateGraph;
 struct SessionMergeOptions;
 
 /**
@@ -143,6 +144,12 @@ struct GlobalMappingCallbacks {
    * @param pruned_mask   Submaps unavailable for selection or rendering
    */
   static CallbackSlot<void(GraphEditState state, const std::vector<uint8_t>& pruned_mask)> on_graph_edit_state_changed;
+
+  /**
+   * @brief Candidate graph view update callback
+   * @param candidate Current graph being edited and displayed
+   */
+  static CallbackSlot<void(const CandidateGraph& candidate)> on_candidate_graph_updated;
 
   /**
    * @brief Request the global mapping module to perform optimization
