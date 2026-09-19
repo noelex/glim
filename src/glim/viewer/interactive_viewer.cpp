@@ -354,8 +354,8 @@ void InteractiveViewer::drawable_selection() {
     ImGui::Separator();
 
     ImGui::BeginDisabled(session_merge_in_progress);
-    ImGui::Text("Pruning: %zu ranges, %d submaps", requested_prune_ranges.size(), count_submaps(requested_prune_ranges));
-    if (ImGui::Button("Select submaps to prune")) {
+    ImGui::Text("Pruning: %d submaps in %zu ranges", count_submaps(requested_prune_ranges), requested_prune_ranges.size());
+    if (ImGui::Button("Select submaps to prune...")) {
       show_submap_pruning_window = true;
       prune_selection_mode = true;
     }
