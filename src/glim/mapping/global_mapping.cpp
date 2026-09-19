@@ -761,7 +761,7 @@ void GlobalMapping::save(const std::string& path) {
   const auto active_values = filter_values_by_keys(isam2->calculateEstimate(), pruned_keys);
   try {
     validate_factor_keys(active_factors, active_values);
-    find_unique_pose_gauge_anchor(active_factors);
+    select_pose_gauge_anchor_key(find_pose_gauge_anchors(active_factors));
     for (int i = 0; i < submaps.size(); i++) {
       if (!is_pruned(i) && !active_values.exists(X(i))) {
         throw std::runtime_error("active submap pose is missing: X" + std::to_string(i));
@@ -1181,7 +1181,7 @@ bool GlobalMapping::load(const std::string& path) {
       }
     }
     if (start_from_frame_id == 0) {
-      find_unique_pose_gauge_anchor(graph);
+      select_pose_gauge_anchor_key(find_pose_gauge_anchors(graph));
     }
   } catch (const std::exception& e) {
     logger->error("loaded graph is inconsistent: {}", e.what());

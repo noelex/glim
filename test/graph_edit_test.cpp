@@ -1,5 +1,6 @@
 #include <glim/mapping/graph_edit.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <functional>
 #include <iostream>
@@ -121,51 +122,57 @@ void test_pose_anchors() {
   const gtsam::Pose3 original_prior(gtsam::Rot3::RzRyRx(0.1, 0.2, 0.3), gtsam::Point3(1.0, 2.0, 3.0));
 
   gtsam::NonlinearFactorGraph original_factors;
+  original_factors.emplace_shared<gtsam_points::LinearDampingFactor>(X(2), 6, 456.0);
   original_factors.emplace_shared<gtsam::PriorFactor<gtsam::Pose3>>(X(0), original_prior, anchor_noise);
+  original_factors.emplace_shared<gtsam_points::LinearDampingFactor>(X(0), 6, 123.0);
   original_factors.emplace_shared<gtsam::PriorFactor<gtsam::Vector3>>(V(0), gtsam::Vector3::Zero(), gtsam::noiseModel::Isotropic::Sigma(3, 1.0));
 
-  const auto original_anchor = glim::find_unique_pose_gauge_anchor(original_factors);
-  expect(original_anchor.type == glim::PoseGaugeAnchor::Type::POSE_PRIOR, "pose prior gauge anchor type is incorrect");
-  expect(original_anchor.key == X(0), "pose gauge anchor key is incorrect");
-  expect(original_anchor.prior.equals(original_prior), "pose gauge anchor prior is incorrect");
+  const auto original_anchors = glim::find_pose_gauge_anchors(original_factors);
+  expect(original_anchors.size() == 3, "full pose anchors were not detected");
+  expect(glim::select_pose_gauge_anchor_key(original_anchors) == X(0), "lowest anchored pose must be the primary gauge pose");
+  expect_throw<std::invalid_argument>([] { glim::select_pose_gauge_anchor_key({}); }, "missing pose gauge anchors must be rejected");
+
+  gtsam::NonlinearFactorGraph retained_factors = original_factors;
+  gtsam::Values retained_values;
+  retained_values.insert(X(0), gtsam::Pose3());
+  glim::ensure_pose_gauge_anchor(retained_factors, retained_values, original_anchors, {0});
+  expect(retained_factors.size() == original_factors.size(), "an active primary gauge pose must not gain duplicate anchors");
 
   gtsam::Values candidate_values;
   const gtsam::Pose3 target_pose(gtsam::Rot3::Rz(0.4), gtsam::Point3(5.0, 6.0, 7.0));
   candidate_values.insert(X(1), target_pose);
   candidate_values.insert(X(2), gtsam::Pose3());
   gtsam::NonlinearFactorGraph candidate_factors;
-  glim::ensure_pose_gauge_anchor(candidate_factors, candidate_values, original_anchor, {2, 1});
+  candidate_factors.emplace_shared<gtsam_points::LinearDampingFactor>(X(2), 6, 456.0);
+  glim::ensure_pose_gauge_anchor(candidate_factors, candidate_values, original_anchors, {2, 1});
 
-  const auto transferred = glim::find_unique_pose_gauge_anchor(candidate_factors);
-  expect(transferred.key == X(1), "gauge anchor must transfer to the lowest active target submap ID");
-  expect(transferred.prior.equals(target_pose), "transferred gauge anchor must use the current global pose");
-  expect(transferred.noise_model->equals(*anchor_noise), "transferred gauge anchor must preserve the original noise model");
+  const auto transferred = glim::find_pose_gauge_anchors(candidate_factors);
+  expect(transferred.size() == 3, "all primary anchors must transfer while recovery anchors remain in place");
+  expect(glim::select_pose_gauge_anchor_key(transferred) == X(1), "gauge anchors must transfer to the lowest active target submap ID");
 
-  expect_throw<std::invalid_argument>([] { glim::find_unique_pose_gauge_anchor({}); }, "zero pose gauge anchors must be rejected");
+  const auto transferred_prior =
+    std::find_if(transferred.begin(), transferred.end(), [](const auto& anchor) { return anchor.key == X(1) && anchor.type == glim::PoseGaugeAnchor::Type::POSE_PRIOR; });
+  expect(transferred_prior != transferred.end(), "pose prior gauge anchor was not transferred");
+  expect(transferred_prior->prior.equals(target_pose), "transferred gauge prior must use the current global pose");
+  expect(transferred_prior->noise_model->equals(*anchor_noise), "transferred gauge prior must preserve its noise model");
 
-  gtsam::NonlinearFactorGraph multiple_anchors;
-  multiple_anchors.emplace_shared<gtsam::PriorFactor<gtsam::Pose3>>(X(0), gtsam::Pose3(), anchor_noise);
-  multiple_anchors.emplace_shared<gtsam::PriorFactor<gtsam::Pose3>>(X(1), gtsam::Pose3(), anchor_noise);
-  expect_throw<std::invalid_argument>([&] { glim::find_unique_pose_gauge_anchor(multiple_anchors); }, "multiple pose gauge anchors must be rejected");
+  const auto transferred_damping =
+    std::find_if(transferred.begin(), transferred.end(), [](const auto& anchor) { return anchor.key == X(1) && anchor.type == glim::PoseGaugeAnchor::Type::LINEAR_DAMPING; });
+  expect(transferred_damping != transferred.end(), "linear damping gauge anchor was not transferred");
+  expect(transferred_damping->damping_diagonal.isApprox(gtsam::Vector6::Constant(123.0)), "transferred damping semantics changed");
 
-  gtsam::Values old_anchor_still_active;
-  old_anchor_still_active.insert(X(0), gtsam::Pose3());
-  gtsam::NonlinearFactorGraph missing_anchor;
-  expect_throw<std::invalid_argument>(
-    [&] { glim::ensure_pose_gauge_anchor(missing_anchor, old_anchor_still_active, original_anchor, {0}); },
-    "a missing gauge anchor must not be silently recreated when its original value remains active");
+  const auto recovery_damping =
+    std::find_if(transferred.begin(), transferred.end(), [](const auto& anchor) { return anchor.key == X(2) && anchor.type == glim::PoseGaugeAnchor::Type::LINEAR_DAMPING; });
+  expect(recovery_damping != transferred.end(), "recovery damping was not preserved");
+  expect(recovery_damping->damping_diagonal.isApprox(gtsam::Vector6::Constant(456.0)), "recovery damping semantics changed");
 
-  gtsam::NonlinearFactorGraph damping_factors;
-  damping_factors.emplace_shared<gtsam_points::LinearDampingFactor>(X(0), 6, 123.0);
-  const auto damping_anchor = glim::find_unique_pose_gauge_anchor(damping_factors);
-  expect(damping_anchor.type == glim::PoseGaugeAnchor::Type::LINEAR_DAMPING, "linear damping gauge anchor type is incorrect");
-  expect(damping_anchor.damping_diagonal.isApprox(gtsam::Vector6::Constant(123.0)), "linear damping diagonal is incorrect");
-
-  gtsam::NonlinearFactorGraph transferred_damping;
-  glim::ensure_pose_gauge_anchor(transferred_damping, candidate_values, damping_anchor, {1, 2});
-  const auto new_damping_anchor = glim::find_unique_pose_gauge_anchor(transferred_damping);
-  expect(new_damping_anchor.key == X(1), "linear damping gauge anchor was not transferred");
-  expect(new_damping_anchor.damping_diagonal.isApprox(damping_anchor.damping_diagonal), "transferred damping semantics changed");
+  gtsam::NonlinearFactorGraph second_candidate = glim::filter_factors_by_keys(candidate_factors, {X(1)});
+  gtsam::Values second_values;
+  second_values.insert(X(2), gtsam::Pose3());
+  glim::ensure_pose_gauge_anchor(second_candidate, second_values, transferred, {2});
+  const auto second_transfer = glim::find_pose_gauge_anchors(second_candidate);
+  expect(second_transfer.size() == 3, "repeated gauge transfer lost anchors");
+  expect(glim::select_pose_gauge_anchor_key(second_transfer) == X(2), "repeated pruning selected an incorrect primary gauge pose");
 }
 
 void test_connectivity() {
@@ -258,6 +265,7 @@ void test_merge_candidate() {
 
   gtsam::NonlinearFactorGraph target_factors;
   target_factors.emplace_shared<gtsam_points::LinearDampingFactor>(X(0), 6, 1e6);
+  target_factors.emplace_shared<gtsam_points::LinearDampingFactor>(X(2), 6, 1e3);
   target_factors.emplace_shared<gtsam::BetweenFactor<gtsam::Pose3>>(X(0), X(1), target_values.at<gtsam::Pose3>(X(0)).between(target_values.at<gtsam::Pose3>(X(1))), hard_noise);
   target_factors.emplace_shared<gtsam::BetweenFactor<gtsam::Pose3>>(X(1), X(2), target_values.at<gtsam::Pose3>(X(1)).between(target_values.at<gtsam::Pose3>(X(2))), hard_noise);
 
@@ -275,7 +283,7 @@ void test_merge_candidate() {
   const auto disconnected = glim::build_session_merge_candidate(target_factors, target_values, source_factors, source_values, 3, 5, options);
   expect(!disconnected.values.exists(X(1)), "pruned pose remains in candidate values");
   expect(disconnected.values.at<gtsam::Pose3>(X(3)).translation().isApprox(gtsam::Point3(5.0, 0.0, 0.0)), "source session global transform is incorrect");
-  expect(disconnected.factors.size() == 3, "disconnected candidate factor count is incorrect");
+  expect(disconnected.factors.size() == 4, "disconnected candidate factor count is incorrect");
   expect(!disconnected.connectivity.all_poses_reachable(), "candidate must remain disconnected when soft bridges are disabled");
   expect(disconnected.connectivity.pose_component_count == 2, "disconnected candidate pose component count is incorrect");
 
@@ -297,7 +305,7 @@ void test_merge_candidate() {
   options.ensure_connected_graph = true;
   const auto connected = glim::build_session_merge_candidate(target_factors, target_values, source_factors, source_values, 3, 5, options);
   expect(connected.connectivity.all_poses_reachable(), "soft bridges failed to connect all candidate poses");
-  expect(connected.factors.size() == 4, "soft bridging must add exactly one factor per disconnected target component");
+  expect(connected.factors.size() == 5, "soft bridging must add exactly one factor per disconnected target component");
   expect(connected.bridges.size() == 1, "soft bridge information is missing");
   expect(connected.bridges[0].from_id == 4 && connected.bridges[0].to_id == 2, "soft bridge information contains incorrect submap IDs");
   expect(std::abs(connected.bridges[0].distance - 14.0) < 1e-9, "soft bridge information contains an incorrect distance");

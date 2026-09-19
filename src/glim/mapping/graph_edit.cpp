@@ -149,28 +149,22 @@ std::vector<PoseGaugeAnchor> find_pose_gauge_anchors(const gtsam::NonlinearFacto
   return anchors;
 }
 
-PoseGaugeAnchor find_unique_pose_gauge_anchor(const gtsam::NonlinearFactorGraph& factors) {
-  const auto anchors = find_pose_gauge_anchors(factors);
-  if (anchors.size() != 1) {
-    throw std::invalid_argument("expected exactly one pose gauge anchor, found " + std::to_string(anchors.size()));
+gtsam::Key select_pose_gauge_anchor_key(const std::vector<PoseGaugeAnchor>& anchors) {
+  if (anchors.empty()) {
+    throw std::invalid_argument("no full pose gauge anchor found");
   }
-  return anchors.front();
+
+  return std::min_element(anchors.begin(), anchors.end(), [](const auto& lhs, const auto& rhs) { return gtsam::Symbol(lhs.key).index() < gtsam::Symbol(rhs.key).index(); })->key;
 }
 
 void ensure_pose_gauge_anchor(
   gtsam::NonlinearFactorGraph& candidate_factors,
   const gtsam::Values& candidate_values,
-  const PoseGaugeAnchor& original_anchor,
+  const std::vector<PoseGaugeAnchor>& original_anchors,
   const std::vector<int>& active_target_submaps) {
-  const auto candidate_anchors = find_pose_gauge_anchors(candidate_factors);
-  if (candidate_anchors.size() > 1) {
-    throw std::invalid_argument("expected at most one candidate pose gauge anchor, found " + std::to_string(candidate_anchors.size()));
-  }
-  if (candidate_anchors.size() == 1) {
+  const auto primary_key = select_pose_gauge_anchor_key(original_anchors);
+  if (candidate_values.exists(primary_key)) {
     return;
-  }
-  if (candidate_values.exists(original_anchor.key)) {
-    throw std::invalid_argument("candidate pose gauge anchor is missing while its value remains active");
   }
   if (active_target_submaps.empty()) {
     throw std::invalid_argument("cannot transfer pose gauge anchor without an active target submap");
@@ -184,12 +178,18 @@ void ensure_pose_gauge_anchor(
 
   const int target_id = *std::min_element(active_target_submaps.begin(), active_target_submaps.end());
   const auto target_key = submap_state_keys(target_id).origin_pose;
-  if (original_anchor.type == PoseGaugeAnchor::Type::POSE_PRIOR) {
-    // Transfer only the gauge noise semantics; the new mean is the active
-    // submap's current global pose.
-    candidate_factors.emplace_shared<gtsam::PriorFactor<gtsam::Pose3>>(target_key, candidate_values.at<gtsam::Pose3>(target_key), original_anchor.noise_model);
-  } else {
-    candidate_factors.emplace_shared<gtsam_points::LinearDampingFactor>(target_key, original_anchor.damping_diagonal);
+  for (const auto& anchor : original_anchors) {
+    if (anchor.key != primary_key) {
+      continue;
+    }
+
+    if (anchor.type == PoseGaugeAnchor::Type::POSE_PRIOR) {
+      // Preserve the prior's strength while anchoring the new pose at its
+      // current global estimate.
+      candidate_factors.emplace_shared<gtsam::PriorFactor<gtsam::Pose3>>(target_key, candidate_values.at<gtsam::Pose3>(target_key), anchor.noise_model);
+    } else {
+      candidate_factors.emplace_shared<gtsam_points::LinearDampingFactor>(target_key, anchor.damping_diagonal);
+    }
   }
 }
 
@@ -273,7 +273,7 @@ CandidateGraph build_session_merge_candidate(
 
   validate_factor_keys(target_factors, target_values);
   validate_factor_keys(source_factors, source_values);
-  const auto original_anchor = find_unique_pose_gauge_anchor(target_factors);
+  const auto original_anchors = find_pose_gauge_anchors(target_factors);
 
   CandidateGraph candidate;
   candidate.requested_prune_ranges = normalize_submap_ranges(options.prune_ranges);
@@ -341,9 +341,9 @@ CandidateGraph build_session_merge_candidate(
   candidate.values.insert(transformed_source_values);
   candidate.factors.push_back(options.merge_factor);
 
-  ensure_pose_gauge_anchor(candidate.factors, candidate.values, original_anchor, active_target_submaps);
-  auto anchor = find_unique_pose_gauge_anchor(candidate.factors);
-  candidate.connectivity = analyze_graph_connectivity(candidate.values, candidate.factors, anchor.key);
+  ensure_pose_gauge_anchor(candidate.factors, candidate.values, original_anchors, active_target_submaps);
+  const auto anchor_key = select_pose_gauge_anchor_key(find_pose_gauge_anchors(candidate.factors));
+  candidate.connectivity = analyze_graph_connectivity(candidate.values, candidate.factors, anchor_key);
 
   if (options.ensure_connected_graph && !candidate.connectivity.all_poses_reachable()) {
     const gtsam::Vector6 sigmas = (gtsam::Vector6() << options.bridge_rotation_sigma,
@@ -402,7 +402,7 @@ CandidateGraph build_session_merge_candidate(
       candidate.bridges.push_back({best_source, best_target, std::sqrt(best_squared_distance)});
     }
 
-    candidate.connectivity = analyze_graph_connectivity(candidate.values, candidate.factors, anchor.key);
+    candidate.connectivity = analyze_graph_connectivity(candidate.values, candidate.factors, anchor_key);
   }
 
   if (!candidate.connectivity.all_poses_reachable()) {
@@ -417,8 +417,8 @@ void append_candidate_factors(CandidateGraph& candidate, const gtsam::NonlinearF
   validate_factor_keys(factors, candidate.values);
   candidate.factors.add(factors);
 
-  const auto anchor = find_unique_pose_gauge_anchor(candidate.factors);
-  candidate.connectivity = analyze_graph_connectivity(candidate.values, candidate.factors, anchor.key);
+  const auto anchor_key = select_pose_gauge_anchor_key(find_pose_gauge_anchors(candidate.factors));
+  candidate.connectivity = analyze_graph_connectivity(candidate.values, candidate.factors, anchor_key);
   if (candidate.connectivity.all_poses_reachable()) {
     candidate.diagnostic.clear();
   } else {
@@ -442,8 +442,8 @@ TrialISAM2Build build_trial_isam2(const gtsam::NonlinearFactorGraph& factors, co
     }
   }
 
-  const auto anchor = find_unique_pose_gauge_anchor(factors);
-  const auto connectivity = analyze_graph_connectivity(values, factors, anchor.key);
+  const auto anchor_key = select_pose_gauge_anchor_key(find_pose_gauge_anchors(factors));
+  const auto connectivity = analyze_graph_connectivity(values, factors, anchor_key);
   if (!connectivity.all_poses_reachable()) {
     throw std::invalid_argument("not all pose values are reachable from the pose gauge anchor");
   }

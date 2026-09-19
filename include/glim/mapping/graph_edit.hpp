@@ -109,27 +109,27 @@ struct PoseGaugeAnchor {
 std::vector<PoseGaugeAnchor> find_pose_gauge_anchors(const gtsam::NonlinearFactorGraph& factors);
 
 /**
- * @brief Find the unique full pose gauge anchor
- * @param factors Factors to inspect
- * @return Unique full pose gauge anchor
- * @throws std::invalid_argument if the graph has zero or multiple anchors
+ * @brief Select the primary gauge pose from full pose anchors
+ * @param anchors Full pose anchors to inspect
+ * @return Anchored X key with the lowest submap ID
+ * @throws std::invalid_argument if no anchor is available
  */
-PoseGaugeAnchor find_unique_pose_gauge_anchor(const gtsam::NonlinearFactorGraph& factors);
+gtsam::Key select_pose_gauge_anchor_key(const std::vector<PoseGaugeAnchor>& anchors);
 
 /**
  * @brief Preserve or deterministically transfer the full pose gauge anchor
  * @param candidate_factors Candidate factors to update
  * @param candidate_values Candidate values after pruning
- * @param original_anchor Anchor from the target graph
+ * @param original_anchors Anchors from the target graph
  * @param active_target_submaps Active target submap IDs
  *
- * If the original anchor was pruned, an equivalent anchor is placed at the
- * current pose of the lowest active target submap ID.
+ * If the primary gauge pose was pruned, all of its anchors are transferred to
+ * the current pose of the lowest active target submap ID.
  */
 void ensure_pose_gauge_anchor(
   gtsam::NonlinearFactorGraph& candidate_factors,
   const gtsam::Values& candidate_values,
-  const PoseGaugeAnchor& original_anchor,
+  const std::vector<PoseGaugeAnchor>& original_anchors,
   const std::vector<int>& active_target_submaps);
 
 /**
