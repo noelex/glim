@@ -129,14 +129,11 @@ protected:
   bool show_submap_pruning_window;
   bool hide_selected_submaps;
   bool hide_additional_session;
-  bool ensure_connected_graph;
   bool session_merge_in_progress;
   int prune_range_start;
   int prune_range_end;
   int prune_start_input;
   int prune_end_input;
-  float bridge_rotation_sigma_deg;
-  float bridge_translation_sigma;
   std::vector<SubmapRange> requested_prune_ranges;
   std::vector<uint8_t> unavailable_submap_mask;
   std::unique_ptr<SessionMergeOptions> pending_merge_options;

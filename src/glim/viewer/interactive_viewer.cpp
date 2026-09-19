@@ -98,14 +98,11 @@ InteractiveViewer::InteractiveViewer() : logger(create_module_logger("viewer")) 
   show_submap_pruning_window = false;
   hide_selected_submaps = false;
   hide_additional_session = true;
-  ensure_connected_graph = true;
   session_merge_in_progress = false;
   prune_range_start = -1;
   prune_range_end = -1;
   prune_start_input = 0;
   prune_end_input = 0;
-  bridge_rotation_sigma_deg = 1.0f;
-  bridge_translation_sigma = 0.05f;
   candidate_component_count = 0;
 
   enable_partial_rendering = config.param("interactive_viewer", "enable_partial_rendering", false);
@@ -360,18 +357,6 @@ void InteractiveViewer::drawable_selection() {
       prune_selection_mode = true;
     }
 
-    ImGui::Checkbox("Bridge disconnected components", &ensure_connected_graph);
-    if (ImGui::IsItemHovered()) {
-      ImGui::SetTooltip("Add soft bridge factors if pruning disconnects the graph.");
-    }
-    if (ImGui::BeginMenu("Bridge factor settings")) {
-      ImGui::BeginDisabled(!ensure_connected_graph);
-      ImGui::DragFloat("Rotation sigma (deg)", &bridge_rotation_sigma_deg, 0.1f, 0.1f, 180.0f);
-      ImGui::DragFloat("Translation sigma (m)", &bridge_translation_sigma, 0.01f, 0.01f, 100.0f);
-      ImGui::EndDisabled();
-      ImGui::EndMenu();
-    }
-
     if (ImGui::Button("Merge sessions") || show_note("Align and merge the lastly loaded session with the active graph.")) {
       begin_session_merge();
     }
@@ -600,12 +585,8 @@ void InteractiveViewer::begin_session_merge() {
     return;
   }
 
-  constexpr double DEG_TO_RAD = 3.14159265358979323846 / 180.0;
   pending_merge_options = std::make_unique<SessionMergeOptions>();
   pending_merge_options->prune_ranges = requested_prune_ranges;
-  pending_merge_options->ensure_connected_graph = ensure_connected_graph;
-  pending_merge_options->bridge_rotation_sigma = bridge_rotation_sigma_deg * DEG_TO_RAD;
-  pending_merge_options->bridge_translation_sigma = bridge_translation_sigma;
 
   show_submap_pruning_window = false;
   prune_selection_mode = false;
@@ -624,7 +605,6 @@ void InteractiveViewer::reset_graph_edit_ui() {
   prune_selection_mode = false;
   hide_selected_submaps = false;
   hide_additional_session = true;
-  ensure_connected_graph = true;
   session_merge_in_progress = false;
   pending_merge_options.reset();
   candidate_component_count = 0;

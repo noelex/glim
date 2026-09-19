@@ -1,8 +1,6 @@
 #include <glim/mapping/graph_edit.hpp>
 
 #include <algorithm>
-#include <cmath>
-#include <limits>
 #include <map>
 #include <set>
 #include <stdexcept>
@@ -275,9 +273,6 @@ CandidateGraph build_session_merge_candidate(
   if (!options.merge_factor) {
     throw std::invalid_argument("session merge candidate requires a merge factor");
   }
-  if (options.bridge_rotation_sigma <= 0.0 || options.bridge_translation_sigma <= 0.0) {
-    throw std::invalid_argument("soft bridge sigmas must be positive");
-  }
 
   validate_factor_keys(target_factors, target_values);
   validate_factor_keys(source_factors, source_values);
@@ -352,66 +347,6 @@ CandidateGraph build_session_merge_candidate(
   ensure_pose_gauge_anchor(candidate.factors, candidate.values, original_anchors, active_target_submaps);
   const auto anchor_key = select_pose_gauge_anchor_key(find_pose_gauge_anchors(candidate.factors));
   candidate.connectivity = analyze_graph_connectivity(candidate.values, candidate.factors, anchor_key);
-
-  if (options.ensure_connected_graph && !candidate.connectivity.all_poses_reachable()) {
-    const gtsam::Vector6 sigmas = (gtsam::Vector6() << options.bridge_rotation_sigma,
-                                   options.bridge_rotation_sigma,
-                                   options.bridge_rotation_sigma,
-                                   options.bridge_translation_sigma,
-                                   options.bridge_translation_sigma,
-                                   options.bridge_translation_sigma)
-                                    .finished();
-    const auto noise = gtsam::noiseModel::Diagonal::Sigmas(sigmas);
-
-    for (const auto& component : candidate.connectivity.components) {
-      std::vector<int> component_targets;
-      bool contains_source = false;
-      for (const gtsam::Key key : component) {
-        const gtsam::Symbol symbol(key);
-        if (symbol.chr() != 'x') {
-          continue;
-        }
-        if (symbol.index() < static_cast<size_t>(source_begin)) {
-          component_targets.push_back(symbol.index());
-        } else {
-          contains_source = true;
-        }
-      }
-      if (component_targets.empty() || contains_source) {
-        continue;
-      }
-
-      double best_squared_distance = std::numeric_limits<double>::max();
-      int best_target = -1;
-      int best_source = -1;
-      for (const int target_id : component_targets) {
-        const auto target = candidate.values.at<gtsam::Pose3>(gtsam::Symbol('x', target_id));
-        for (int source_id = source_begin; source_id < total_submaps; source_id++) {
-          if (!candidate.values.exists(gtsam::Symbol('x', source_id))) {
-            continue;
-          }
-          const auto source = candidate.values.at<gtsam::Pose3>(gtsam::Symbol('x', source_id));
-          const double squared_distance = (target.translation() - source.translation()).squaredNorm();
-          if (squared_distance < best_squared_distance) {
-            best_squared_distance = squared_distance;
-            best_target = target_id;
-            best_source = source_id;
-          }
-        }
-      }
-
-      const auto source_pose_global = candidate.values.at<gtsam::Pose3>(gtsam::Symbol('x', best_source));
-      const auto target_pose_global = candidate.values.at<gtsam::Pose3>(gtsam::Symbol('x', best_target));
-      candidate.factors.emplace_shared<gtsam::BetweenFactor<gtsam::Pose3>>(
-        gtsam::Symbol('x', best_source),
-        gtsam::Symbol('x', best_target),
-        source_pose_global.between(target_pose_global),
-        noise);
-      candidate.bridges.push_back({best_source, best_target, std::sqrt(best_squared_distance)});
-    }
-
-    candidate.connectivity = analyze_graph_connectivity(candidate.values, candidate.factors, anchor_key);
-  }
 
   if (!candidate.connectivity.all_poses_reachable()) {
     candidate.diagnostic =

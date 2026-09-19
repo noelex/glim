@@ -482,13 +482,9 @@ void GlobalMapping::merge_sessions(const SessionMergeOptions& options) {
       build_session_merge_candidate(isam2->getFactorsUnsafe(), isam2->calculateEstimate(), source_factors, source_values, committed_submap_count, submaps.size(), options);
 
     candidate = std::make_unique<CandidateGraph>(std::move(next_candidate));
-    for (const auto& bridge : candidate->bridges) {
-      logger->info("added soft bridge: X{} -> X{}, distance={:.3f} m", bridge.from_id, bridge.to_id, bridge.distance);
-    }
     logger->info(
-      "session merge candidate: pruned {} submap(s), added {} soft bridge factor(s), {} connected component(s)",
+      "session merge candidate: pruned {} submap(s), {} connected component(s)",
       count_submaps(candidate->applied_prune_ranges),
-      candidate->bridges.size(),
       candidate->connectivity.pose_component_count);
     edit_state = GraphEditState::CANDIDATE_EDITING;
     new_factors->resize(0);
@@ -544,6 +540,12 @@ bool GlobalMapping::try_commit_candidate() {
     Callbacks::on_update_submaps(submaps);
     logger->info("candidate graph committed");
     return true;
+  } catch (const gtsam::IndeterminantLinearSystemException& e) {
+    const auto nearby = gtsam::DefaultKeyFormatter(e.nearbyVariable());
+    candidate->diagnostic = "Candidate graph is connected but still underconstrained near " + nearby + ". Add additional loop closures or find overlapping submaps.";
+    notify_candidate_graph();
+    logger->error("candidate graph failed trial iSAM2 build: {}", e.what());
+    return false;
   } catch (const std::exception& e) {
     candidate->diagnostic = e.what();
     notify_candidate_graph();

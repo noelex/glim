@@ -1,13 +1,13 @@
 #include <glim/mapping/graph_edit.hpp>
 
 #include <algorithm>
-#include <cmath>
 #include <functional>
 #include <iostream>
 #include <stdexcept>
 #include <string>
 
 #include <gtsam/inference/Symbol.h>
+#include <gtsam/linear/linearExceptions.h>
 #include <gtsam/navigation/ImuBias.h>
 #include <gtsam/nonlinear/PriorFactor.h>
 #include <gtsam/sam/RangeFactor.h>
@@ -241,7 +241,7 @@ void test_trial_isam2_build() {
   gtsam::NonlinearFactorGraph underconstrained;
   underconstrained.emplace_shared<gtsam::PriorFactor<gtsam::Pose3>>(X(0), gtsam::Pose3(), noise);
   underconstrained.emplace_shared<gtsam::RangeFactor<gtsam::Pose3, gtsam::Pose3>>(X(0), X(1), 1.0, gtsam::noiseModel::Isotropic::Sigma(1, 0.1));
-  expect_throw(
+  expect_throw<gtsam::IndeterminantLinearSystemException>(
     [&] { glim::build_trial_isam2(underconstrained, values, gtsam::ISAM2Params()); },
     "topologically connected but numerically underconstrained graph must fail trial build");
 }
@@ -284,13 +284,12 @@ void test_merge_candidate() {
   glim::SessionMergeOptions options;
   options.merge_factor = gtsam::make_shared<gtsam::BetweenFactor<gtsam::Pose3>>(X(0), X(3), gtsam::Pose3(gtsam::Rot3(), gtsam::Point3(5.0, 0.0, 0.0)), hard_noise);
   options.prune_ranges = {{1, 1}};
-  options.ensure_connected_graph = false;
 
   const auto disconnected = glim::build_session_merge_candidate(target_factors, target_values, source_factors, source_values, 3, 5, options);
   expect(!disconnected.values.exists(X(1)), "pruned pose remains in candidate values");
   expect(disconnected.values.at<gtsam::Pose3>(X(3)).translation().isApprox(gtsam::Point3(5.0, 0.0, 0.0)), "source session global transform is incorrect");
   expect(disconnected.factors.size() == 4, "disconnected candidate factor count is incorrect");
-  expect(!disconnected.connectivity.all_poses_reachable(), "candidate must remain disconnected when soft bridges are disabled");
+  expect(!disconnected.connectivity.all_poses_reachable(), "pruned candidate must remain disconnected until repaired with observed constraints");
   expect(disconnected.connectivity.pose_component_count == 2, "disconnected candidate pose component count is incorrect");
 
   auto edited = disconnected;
@@ -308,22 +307,9 @@ void test_merge_candidate() {
   const auto edited_trial = glim::build_trial_isam2(edited.factors, edited.values, gtsam::ISAM2Params());
   expect(edited_trial.estimate.size() == edited.values.size(), "manually repaired candidate failed trial build");
 
-  options.ensure_connected_graph = true;
-  const auto connected = glim::build_session_merge_candidate(target_factors, target_values, source_factors, source_values, 3, 5, options);
-  expect(connected.connectivity.all_poses_reachable(), "soft bridges failed to connect all candidate poses");
-  expect(connected.factors.size() == 5, "soft bridging must add exactly one factor per disconnected target component");
-  expect(connected.bridges.size() == 1, "soft bridge information is missing");
-  expect(connected.bridges[0].from_id == 4 && connected.bridges[0].to_id == 2, "soft bridge information contains incorrect submap IDs");
-  expect(std::abs(connected.bridges[0].distance - 14.0) < 1e-9, "soft bridge information contains an incorrect distance");
-  const auto bridge_factor = dynamic_cast<const gtsam::BetweenFactor<gtsam::Pose3>*>(connected.factors.back().get());
-  expect(bridge_factor && bridge_factor->key1() == X(4) && bridge_factor->key2() == X(2), "soft bridging did not select the nearest source-to-target pair");
-  const auto trial_build = glim::build_trial_isam2(connected.factors, connected.values, gtsam::ISAM2Params());
-  expect(trial_build.estimate.size() == connected.values.size(), "connected session merge candidate failed trial build");
-
   options.prune_ranges.clear();
   const auto ordinary_merge = glim::build_session_merge_candidate(target_factors, target_values, source_factors, source_values, 3, 5, options);
   expect(ordinary_merge.connectivity.all_poses_reachable(), "ordinary merge without pruning must remain connected");
-  expect(ordinary_merge.bridges.empty(), "ordinary connected merge recorded an unexpected soft bridge");
   expect(ordinary_merge.values.size() == target_values.size() + source_values.size(), "ordinary merge lost values");
   expect(ordinary_merge.factors.size() == target_factors.size() + source_factors.size() + 1, "ordinary merge added unexpected factors");
 
