@@ -21,7 +21,6 @@
 #include <glim/util/config.hpp>
 #include <glim/util/serialization.hpp>
 #include <glim/mapping/callbacks.hpp>
-#include <glim/mapping/graph_metadata.hpp>
 
 #ifdef GTSAM_USE_TBB
 #include <tbb/task_arena.h>
@@ -205,13 +204,11 @@ void GlobalMappingPoseGraph::save(const std::string& path) {
   serializeToBinaryFile(serializable_factors, path + "/graph.bin");
   serializeToBinaryFile(isam2->calculateEstimate(), path + "/values.bin");
 
-  GraphMetadata metadata;
-  metadata.num_submaps = submaps.size();
-  metadata.num_all_frames = std::accumulate(submaps.begin(), submaps.end(), 0, [](int sum, const SubMap::ConstPtr& submap) { return sum + submap->frames.size(); });
-  metadata.num_active_frames = metadata.num_all_frames;
-
   std::ofstream ofs(path + "/graph.txt");
-  write_graph_metadata(ofs, metadata);
+  ofs << "num_submaps: " << submaps.size() << std::endl;
+  ofs << "num_all_frames: " << std::accumulate(submaps.begin(), submaps.end(), 0, [](int sum, const SubMap::ConstPtr& submap) { return sum + submap->frames.size(); }) << std::endl;
+
+  ofs << "num_matching_cost_factors: " << 0 << std::endl;
 
   std::ofstream odom_lidar_ofs(path + "/odom_lidar.txt");
   std::ofstream traj_lidar_ofs(path + "/traj_lidar.txt");

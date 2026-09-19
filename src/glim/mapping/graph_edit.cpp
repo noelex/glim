@@ -407,7 +407,7 @@ CandidateGraph build_session_merge_candidate(
 
   if (!candidate.connectivity.all_poses_reachable()) {
     candidate.diagnostic =
-      "Graph has " + std::to_string(candidate.connectivity.pose_component_count) + " connected components. Add loop closures or find overlapping submaps before optimization.";
+      "Graph has " + std::to_string(candidate.connectivity.pose_component_count) + " connected components. Add loop closures or find overlapping submaps to connect the graph.";
   }
 
   return candidate;
@@ -423,7 +423,7 @@ void append_candidate_factors(CandidateGraph& candidate, const gtsam::NonlinearF
     candidate.diagnostic.clear();
   } else {
     candidate.diagnostic =
-      "Graph has " + std::to_string(candidate.connectivity.pose_component_count) + " connected components. Add loop closures or find overlapping submaps before optimization.";
+      "Graph has " + std::to_string(candidate.connectivity.pose_component_count) + " connected components. Add loop closures or find overlapping submaps to connect the graph.";
   }
 }
 

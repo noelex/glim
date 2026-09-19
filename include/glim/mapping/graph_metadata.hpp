@@ -34,14 +34,6 @@ std::vector<SubmapRange> normalize_submap_ranges(const std::vector<SubmapRange>&
 std::vector<SubmapRange> union_submap_ranges(const std::vector<SubmapRange>& lhs, const std::vector<SubmapRange>& rhs);
 
 /**
- * @brief Subtract one submap range set from another
- * @param ranges Source ranges
- * @param removed Ranges to subtract
- * @return Canonical range difference
- */
-std::vector<SubmapRange> subtract_submap_ranges(const std::vector<SubmapRange>& ranges, const std::vector<SubmapRange>& removed);
-
-/**
  * @brief Shift all submap IDs by a fixed offset
  * @param ranges Input ranges
  * @param offset ID offset
@@ -56,13 +48,6 @@ std::vector<SubmapRange> offset_submap_ranges(const std::vector<SubmapRange>& ra
  * @return Byte mask with nonzero entries for selected submaps
  */
 std::vector<uint8_t> submap_ranges_to_mask(const std::vector<SubmapRange>& ranges, int num_submaps);
-
-/**
- * @brief Convert an index-aligned mask to canonical ranges
- * @param mask Byte mask
- * @return Canonical inclusive ranges
- */
-std::vector<SubmapRange> submap_mask_to_ranges(const std::vector<uint8_t>& mask);
 
 /**
  * @brief Expand submap ranges into sorted IDs

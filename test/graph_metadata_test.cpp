@@ -46,15 +46,11 @@ void test_ranges() {
   const std::vector<SubmapRange> united{{1, 5}, {8, 12}};
   expect(glim::union_submap_ranges({{1, 3}, {8, 9}}, {{4, 5}, {10, 12}}) == united, "range union is incorrect");
 
-  const std::vector<SubmapRange> subtracted{{3, 3}, {6, 7}, {23, 23}};
-  expect(glim::subtract_submap_ranges({{1, 10}, {20, 25}}, {{0, 2}, {4, 5}, {8, 22}, {24, 30}}) == subtracted, "range subtraction is incorrect");
-
   expect(glim::offset_submap_ranges({{1, 2}, {5, 8}}, 10) == std::vector<SubmapRange>({{11, 12}, {15, 18}}), "range offset is incorrect");
   expect_throw<std::out_of_range>([] { glim::offset_submap_ranges({{0, 2}}, -1); }, "negative offset result must be rejected");
 
   const std::vector<uint8_t> mask{0, 1, 1, 1, 0, 1, 0};
   expect(glim::submap_ranges_to_mask({{1, 3}, {5, 5}}, 7) == mask, "range-to-mask conversion is incorrect");
-  expect(glim::submap_mask_to_ranges(mask) == std::vector<SubmapRange>({{1, 3}, {5, 5}}), "mask-to-range conversion is incorrect");
   expect(glim::submap_ranges_to_ids({{1, 3}, {5, 5}}) == std::vector<int>({1, 2, 3, 5}), "range-to-ID conversion is incorrect");
   expect(glim::submap_ids_to_ranges({5, 2, 1, 3, 2}) == std::vector<SubmapRange>({{1, 3}, {5, 5}}), "ID-to-range conversion is incorrect");
   expect_throw<std::invalid_argument>([] { glim::submap_ids_to_ranges({1, -1}); }, "negative submap ID must be rejected");

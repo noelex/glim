@@ -63,40 +63,6 @@ std::vector<SubmapRange> union_submap_ranges(const std::vector<SubmapRange>& lhs
   return normalize_submap_ranges(combined);
 }
 
-std::vector<SubmapRange> subtract_submap_ranges(const std::vector<SubmapRange>& ranges, const std::vector<SubmapRange>& removed) {
-  const auto source = normalize_submap_ranges(ranges);
-  const auto excluded = normalize_submap_ranges(removed);
-
-  std::vector<SubmapRange> result;
-  size_t removed_index = 0;
-  for (const auto& range : source) {
-    int next = range.first;
-    while (removed_index < excluded.size() && excluded[removed_index].last < next) {
-      removed_index++;
-    }
-
-    size_t current_removed = removed_index;
-    while (current_removed < excluded.size() && excluded[current_removed].first <= range.last) {
-      const auto& cut = excluded[current_removed];
-      if (cut.first > next) {
-        result.push_back({next, std::min(range.last, cut.first - 1)});
-      }
-      if (cut.last >= range.last) {
-        next = range.last + 1;
-        break;
-      }
-      next = std::max(next, cut.last + 1);
-      current_removed++;
-    }
-
-    if (next <= range.last) {
-      result.push_back({next, range.last});
-    }
-  }
-
-  return result;
-}
-
 std::vector<SubmapRange> offset_submap_ranges(const std::vector<SubmapRange>& ranges, const int offset) {
   auto shifted = normalize_submap_ranges(ranges);
   for (auto& range : shifted) {
@@ -124,24 +90,6 @@ std::vector<uint8_t> submap_ranges_to_mask(const std::vector<SubmapRange>& range
     std::fill(mask.begin() + range.first, mask.begin() + range.last + 1, 1);
   }
   return mask;
-}
-
-std::vector<SubmapRange> submap_mask_to_ranges(const std::vector<uint8_t>& mask) {
-  std::vector<SubmapRange> ranges;
-  for (int i = 0; i < static_cast<int>(mask.size());) {
-    if (!mask[i]) {
-      i++;
-      continue;
-    }
-
-    const int first = i;
-    while (i + 1 < static_cast<int>(mask.size()) && mask[i + 1]) {
-      i++;
-    }
-    ranges.push_back({first, i});
-    i++;
-  }
-  return ranges;
 }
 
 std::vector<int> submap_ranges_to_ids(const std::vector<SubmapRange>& ranges) {

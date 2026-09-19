@@ -352,11 +352,10 @@ void InteractiveViewer::drawable_selection() {
 
   if (edit_state == GraphEditState::SESSION_MERGE_PENDING && !submaps.empty()) {
     ImGui::Separator();
-    ImGui::TextUnformatted("Pending session merge");
 
     ImGui::BeginDisabled(session_merge_in_progress);
     ImGui::Text("Pruning: %zu ranges, %d submaps", requested_prune_ranges.size(), count_submaps(requested_prune_ranges));
-    if (ImGui::Button("Edit prune ranges...")) {
+    if (ImGui::Button("Select submaps to prune")) {
       show_submap_pruning_window = true;
       prune_selection_mode = true;
     }
@@ -365,7 +364,7 @@ void InteractiveViewer::drawable_selection() {
     if (ImGui::IsItemHovered()) {
       ImGui::SetTooltip("Add soft bridge factors if pruning disconnects the graph.");
     }
-    if (ImGui::BeginMenu("Advanced...")) {
+    if (ImGui::BeginMenu("Bridge factor settings")) {
       ImGui::BeginDisabled(!ensure_connected_graph);
       ImGui::DragFloat("Rotation sigma (deg)", &bridge_rotation_sigma_deg, 0.1f, 0.1f, 180.0f);
       ImGui::DragFloat("Translation sigma (m)", &bridge_translation_sigma, 0.01f, 0.01f, 100.0f);
@@ -437,10 +436,14 @@ void InteractiveViewer::draw_submap_pruning_window() {
   ImGui::TextUnformatted("Right-click a target sphere to set range endpoints.");
 
   ImGui::SetNextItemWidth(80.0f);
-  ImGui::InputInt("Start", &prune_start_input);
+  if (ImGui::InputInt("Start", &prune_start_input)) {
+    prune_range_start = -1;
+  }
   ImGui::SameLine();
   ImGui::SetNextItemWidth(80.0f);
-  ImGui::InputInt("End", &prune_end_input);
+  if (ImGui::InputInt("End", &prune_end_input)) {
+    prune_range_end = -1;
+  }
   ImGui::SameLine();
   if (ImGui::Button("Add")) {
     if (add_prune_range(prune_start_input, prune_end_input)) {
@@ -490,7 +493,7 @@ void InteractiveViewer::draw_submap_pruning_window() {
   if (ImGui::Checkbox("Hide selected submaps", &hide_selected_submaps)) {
     update_viewer();
   }
-  ImGui::Checkbox("Hide newly loaded session", &hide_additional_session);
+  ImGui::Checkbox("Hide additional session", &hide_additional_session);
   ImGui::Text("Selected: %d submaps in %zu ranges", count_submaps(requested_prune_ranges), requested_prune_ranges.size());
 
   ImGui::End();
@@ -708,8 +711,6 @@ void InteractiveViewer::run_modals() {
   if (manual_loop_close_factor && pending_merge_options) {
     pending_merge_options->merge_factor = manual_loop_close_factor;
 
-    const auto& keys = manual_loop_close_factor->keys();
-    global_factors.emplace_back(FactorType::BETWEEN, keys[0], keys[1]);
     GlobalMappingCallbacks::request_to_merge_sessions(*pending_merge_options);
     pending_merge_options.reset();
   } else {

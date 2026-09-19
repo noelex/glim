@@ -25,7 +25,6 @@
 #include <GLFW/glfw3.h>
 
 #include <glim/mapping/sub_map.hpp>
-#include <glim/mapping/graph_metadata.hpp>
 #include <glim/util/logging.hpp>
 
 namespace glim {
@@ -159,14 +158,14 @@ std::vector<glim::SubMap::Ptr> MapEditor::load_submaps(guik::ProgressInterface& 
     return {};
   }
 
-  GraphMetadata metadata;
-  try {
-    metadata = parse_graph_metadata(ifs);
-  } catch (const std::exception& e) {
-    logger->warn("Invalid graph.txt format: {}", e.what());
+  std::string token;
+  int num_submaps;
+  ifs >> token >> num_submaps;
+
+  if (token != "num_submaps:") {
+    logger->warn("Invalid graph.txt format");
     return {};
   }
-  const int num_submaps = metadata.num_submaps;
 
   progress.set_maximum(num_submaps);
 
