@@ -483,7 +483,7 @@ void GlobalMapping::merge_sessions(const SessionMergeOptions& options) {
 
     candidate = std::make_unique<CandidateGraph>(std::move(next_candidate));
     for (const auto& bridge : candidate->bridges) {
-      logger->info("added soft bridge: X{} -> X{}, distance={:.3f} m", bridge.source_id, bridge.target_id, bridge.distance);
+      logger->info("added soft bridge: X{} -> X{}, distance={:.3f} m", bridge.from_id, bridge.to_id, bridge.distance);
     }
     logger->info(
       "session merge candidate: pruned {} submap(s), added {} soft bridge factor(s), {} connected component(s)",
@@ -506,7 +506,7 @@ void GlobalMapping::merge_sessions(const SessionMergeOptions& options) {
 bool GlobalMapping::try_commit_candidate() {
   if (!candidate->connectivity.all_poses_reachable()) {
     notify_candidate_graph();
-    logger->warn("session merge candidate is disconnected: {}", candidate->diagnostic);
+    logger->warn("candidate graph is disconnected: {}", candidate->diagnostic);
     return false;
   }
 
@@ -542,12 +542,12 @@ bool GlobalMapping::try_commit_candidate() {
     update_submaps();
     Callbacks::on_smoother_update_result(*isam2, committed_result);
     Callbacks::on_update_submaps(submaps);
-    logger->info("session merge committed");
+    logger->info("candidate graph committed");
     return true;
   } catch (const std::exception& e) {
     candidate->diagnostic = e.what();
     notify_candidate_graph();
-    logger->error("session merge candidate failed trial iSAM2 build: {}", e.what());
+    logger->error("candidate graph failed trial iSAM2 build: {}", e.what());
     return false;
   }
 }

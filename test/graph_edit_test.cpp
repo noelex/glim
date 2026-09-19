@@ -299,7 +299,7 @@ void test_merge_candidate() {
   expect(connected.connectivity.all_poses_reachable(), "soft bridges failed to connect all candidate poses");
   expect(connected.factors.size() == 4, "soft bridging must add exactly one factor per disconnected target component");
   expect(connected.bridges.size() == 1, "soft bridge information is missing");
-  expect(connected.bridges[0].source_id == 4 && connected.bridges[0].target_id == 2, "soft bridge information contains incorrect submap IDs");
+  expect(connected.bridges[0].from_id == 4 && connected.bridges[0].to_id == 2, "soft bridge information contains incorrect submap IDs");
   expect(std::abs(connected.bridges[0].distance - 14.0) < 1e-9, "soft bridge information contains an incorrect distance");
   const auto bridge_factor = dynamic_cast<const gtsam::BetweenFactor<gtsam::Pose3>*>(connected.factors.back().get());
   expect(bridge_factor && bridge_factor->key1() == X(4) && bridge_factor->key2() == X(2), "soft bridging did not select the nearest source-to-target pair");

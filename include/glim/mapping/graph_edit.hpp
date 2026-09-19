@@ -179,13 +179,13 @@ struct SessionMergeOptions {
  * @brief Automatically generated soft bridge information
  */
 struct BridgeFactorInfo {
-  int source_id;    ///< Source session submap ID
-  int target_id;    ///< Target session submap ID
+  int from_id;      ///< First bridge endpoint submap ID
+  int to_id;        ///< Second bridge endpoint submap ID
   double distance;  ///< Distance between submap origins in meters
 };
 
 /**
- * @brief Candidate graph produced by a session merge transaction
+ * @brief Candidate graph produced by a graph edit transaction
  */
 struct CandidateGraph {
   gtsam::NonlinearFactorGraph factors;
@@ -201,7 +201,7 @@ struct CandidateGraph {
 };
 
 /**
- * @brief Append factors to a merge candidate and refresh its connectivity
+ * @brief Append factors to a graph edit candidate and refresh its connectivity
  * @param candidate Candidate graph to update
  * @param factors Factors whose keys must already exist in the candidate
  */
