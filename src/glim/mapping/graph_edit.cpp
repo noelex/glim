@@ -142,7 +142,10 @@ std::vector<PoseGaugeAnchor> find_pose_gauge_anchors(const gtsam::NonlinearFacto
       // so identify a full pose gauge anchor from the information matrix instead.
       const auto information = damping->toHessian()->information();
       if (information.rows() == 6 && information.cols() == 6) {
-        anchors.push_back({PoseGaugeAnchor::Type::LINEAR_DAMPING, damping->keys().front(), {}, nullptr, information.diagonal()});
+        const auto diagonal = information.diagonal();
+        if ((diagonal.array() > 0.0).all()) {
+          anchors.push_back({PoseGaugeAnchor::Type::LINEAR_DAMPING, damping->keys().front(), {}, nullptr, diagonal});
+        }
       }
     }
   }
@@ -163,8 +166,13 @@ void ensure_pose_gauge_anchor(
   const std::vector<PoseGaugeAnchor>& original_anchors,
   const std::vector<int>& active_target_submaps) {
   const auto primary_key = select_pose_gauge_anchor_key(original_anchors);
-  if (candidate_values.exists(primary_key)) {
+  const auto candidate_anchors = find_pose_gauge_anchors(candidate_factors);
+  const bool primary_anchor_exists = std::any_of(candidate_anchors.begin(), candidate_anchors.end(), [primary_key](const auto& anchor) { return anchor.key == primary_key; });
+  if (primary_anchor_exists) {
     return;
+  }
+  if (candidate_values.exists(primary_key)) {
+    throw std::invalid_argument("primary pose gauge anchor is missing while its value remains active");
   }
   if (active_target_submaps.empty()) {
     throw std::invalid_argument("cannot transfer pose gauge anchor without an active target submap");
@@ -184,8 +192,8 @@ void ensure_pose_gauge_anchor(
     }
 
     if (anchor.type == PoseGaugeAnchor::Type::POSE_PRIOR) {
-      // Preserve the prior's strength while anchoring the new pose at its
-      // current global estimate.
+      // GlobalMapping treats Pose3 priors as gauge constraints, so preserve
+      // their strength while anchoring the new pose at its current estimate.
       candidate_factors.emplace_shared<gtsam::PriorFactor<gtsam::Pose3>>(target_key, candidate_values.at<gtsam::Pose3>(target_key), anchor.noise_model);
     } else {
       candidate_factors.emplace_shared<gtsam_points::LinearDampingFactor>(target_key, anchor.damping_diagonal);

@@ -123,6 +123,7 @@ void test_pose_anchors() {
 
   gtsam::NonlinearFactorGraph original_factors;
   original_factors.emplace_shared<gtsam_points::LinearDampingFactor>(X(2), 6, 456.0);
+  original_factors.emplace_shared<gtsam_points::LinearDampingFactor>(X(3), (gtsam::Vector6() << 0.0, 0.0, 1e6, 0.0, 0.0, 0.0).finished());
   original_factors.emplace_shared<gtsam::PriorFactor<gtsam::Pose3>>(X(0), original_prior, anchor_noise);
   original_factors.emplace_shared<gtsam_points::LinearDampingFactor>(X(0), 6, 123.0);
   original_factors.emplace_shared<gtsam::PriorFactor<gtsam::Vector3>>(V(0), gtsam::Vector3::Zero(), gtsam::noiseModel::Isotropic::Sigma(3, 1.0));
@@ -137,6 +138,11 @@ void test_pose_anchors() {
   retained_values.insert(X(0), gtsam::Pose3());
   glim::ensure_pose_gauge_anchor(retained_factors, retained_values, original_anchors, {0});
   expect(retained_factors.size() == original_factors.size(), "an active primary gauge pose must not gain duplicate anchors");
+
+  gtsam::NonlinearFactorGraph missing_primary_anchor;
+  expect_throw<std::invalid_argument>(
+    [&] { glim::ensure_pose_gauge_anchor(missing_primary_anchor, retained_values, original_anchors, {0}); },
+    "missing primary anchor must not be silently accepted");
 
   gtsam::Values candidate_values;
   const gtsam::Pose3 target_pose(gtsam::Rot3::Rz(0.4), gtsam::Point3(5.0, 6.0, 7.0));
