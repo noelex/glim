@@ -57,6 +57,7 @@ protected:
 
   void invoke(const std::function<void()>& task);
   void drawable_selection();
+  void draw_submap_pruning_window();
   void on_click();
   void context_menu();
   void run_modals();
@@ -123,6 +124,7 @@ protected:
   std::atomic<GraphEditState> current_graph_edit_state;
 
   bool prune_selection_mode;
+  bool show_submap_pruning_window;
   bool hide_selected_submaps;
   bool ensure_connected_graph;
   bool session_merge_in_progress;

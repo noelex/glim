@@ -67,6 +67,7 @@ InteractiveViewer::InteractiveViewer() : logger(create_module_logger("viewer")) 
   needs_session_merge = false;
   current_graph_edit_state = GraphEditState::IDLE;
   prune_selection_mode = false;
+  show_submap_pruning_window = false;
   hide_selected_submaps = false;
   ensure_connected_graph = true;
   session_merge_in_progress = false;
@@ -137,6 +138,7 @@ void InteractiveViewer::viewer_loop() {
   }
 
   viewer->register_ui_callback("selection", [this] { drawable_selection(); });
+  viewer->register_ui_callback("submap_pruning", [this] { draw_submap_pruning_window(); });
   viewer->register_ui_callback("on_click", [this] { on_click(); });
   viewer->register_ui_callback("context_menu", [this] { context_menu(); });
   viewer->register_ui_callback("run_modals", [this] { run_modals(); });
@@ -228,14 +230,6 @@ void InteractiveViewer::drawable_selection() {
     }
     return false;
   };
-  const auto show_disabled_reason = [](const char* text) {
-    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-      ImGui::BeginTooltip();
-      ImGui::TextUnformatted(text);
-      ImGui::EndTooltip();
-    }
-  };
-
   std::vector<const char*> color_modes = {"RAINBOW", "INTENSITY", "SESSION"};
   if (ImGui::Combo("ColorMode", &color_mode, color_modes.data(), color_modes.size())) {
     update_viewer();
@@ -314,18 +308,12 @@ void InteractiveViewer::drawable_selection() {
     logger->info("finding overlapping submaps...");
     GlobalMappingCallbacks::request_to_find_overlapping_submaps(min_overlap);
   }
-  if (merge_pending) {
-    show_disabled_reason("Create the session merge candidate first.");
-  }
   ImGui::EndDisabled();
 
   ImGui::BeginDisabled(graph_editing);
   if (ImGui::Button("Recover graph") || show_note("Detect and fix corrupted graph.")) {
     logger->info("recovering graph...");
     GlobalMappingCallbacks::request_to_recover();
-  }
-  if (graph_editing) {
-    show_disabled_reason("Recover graph is unavailable while graph editing is in progress.");
   }
   ImGui::EndDisabled();
 
@@ -334,62 +322,23 @@ void InteractiveViewer::drawable_selection() {
     ImGui::TextUnformatted("Pending session merge");
 
     ImGui::BeginDisabled(session_merge_in_progress);
-    if (ImGui::Button("Select submaps to prune...")) {
+    ImGui::Text("Pruning: %zu ranges, %d submaps", requested_prune_ranges.size(), count_submaps(requested_prune_ranges));
+    if (ImGui::Button("Edit prune ranges...")) {
+      show_submap_pruning_window = true;
       prune_selection_mode = true;
     }
 
-    if (prune_selection_mode) {
-      ImGui::TextUnformatted("Selection mode: right-click a target sphere or enter IDs.");
-      ImGui::InputInt("Start submap ID", &prune_start_input);
-      ImGui::InputInt("End submap ID", &prune_end_input);
-      if (ImGui::Button("Add prune range")) {
-        if (add_prune_range(prune_start_input, prune_end_input)) {
-          prune_range_start = -1;
-          prune_range_end = -1;
-          update_viewer();
-        }
-      }
-
-      if (!requested_prune_ranges.empty()) {
-        ImGui::TextUnformatted("Requested prune ranges:");
-      }
-      bool ranges_changed = false;
-      for (int i = 0; i < requested_prune_ranges.size(); i++) {
-        ImGui::PushID(i);
-        int endpoints[2] = {requested_prune_ranges[i].first, requested_prune_ranges[i].last};
-        ImGui::SetNextItemWidth(180.0f);
-        if (ImGui::InputInt2("##prune_range", endpoints)) {
-          if (is_prune_endpoint(endpoints[0]) && is_prune_endpoint(endpoints[1]) && submaps[endpoints[0]]->session_id == submaps[endpoints[1]]->session_id) {
-            if (endpoints[0] > endpoints[1]) {
-              std::swap(endpoints[0], endpoints[1]);
-            }
-            requested_prune_ranges[i] = {endpoints[0], endpoints[1]};
-            ranges_changed = true;
-          } else {
-            logger->warn("invalid prune range [{}, {}]", endpoints[0], endpoints[1]);
-          }
-        }
-        ImGui::SameLine();
-        if (ImGui::SmallButton("Remove")) {
-          requested_prune_ranges.erase(requested_prune_ranges.begin() + i);
-          ranges_changed = true;
-          i--;
-        }
-        ImGui::PopID();
-      }
-      if (ranges_changed) {
-        normalize_requested_prune_ranges();
-        update_viewer();
-      }
-
-      if (ImGui::Checkbox("Hide selected submaps", &hide_selected_submaps)) {
-        update_viewer();
-      }
+    ImGui::Checkbox("Bridge disconnected components", &ensure_connected_graph);
+    if (ImGui::IsItemHovered()) {
+      ImGui::SetTooltip("Add soft bridge factors if pruning disconnects the graph.");
     }
-
-    ImGui::Checkbox("Ensure connected graph", &ensure_connected_graph);
-    ImGui::DragFloat("Rotation sigma (deg)", &bridge_rotation_sigma_deg, 0.1f, 0.1f, 180.0f);
-    ImGui::DragFloat("Translation sigma (m)", &bridge_translation_sigma, 0.01f, 0.01f, 100.0f);
+    if (ImGui::BeginMenu("Advanced...")) {
+      ImGui::BeginDisabled(!ensure_connected_graph);
+      ImGui::DragFloat("Rotation sigma (deg)", &bridge_rotation_sigma_deg, 0.1f, 0.1f, 180.0f);
+      ImGui::DragFloat("Translation sigma (m)", &bridge_translation_sigma, 0.01f, 0.01f, 100.0f);
+      ImGui::EndDisabled();
+      ImGui::EndMenu();
+    }
 
     if (ImGui::Button("Merge sessions") || show_note("Align and merge the lastly loaded session with the active graph.")) {
       begin_session_merge();
@@ -406,9 +355,7 @@ void InteractiveViewer::drawable_selection() {
     logger->info("optimizing...");
     GlobalMappingCallbacks::request_to_optimize();
   }
-  if (graph_editing) {
-    show_disabled_reason("Optimize is unavailable while graph editing is in progress.");
-  } else {
+  if (!graph_editing) {
     show_note("Optimize the graph.");
   }
 
@@ -419,14 +366,96 @@ void InteractiveViewer::drawable_selection() {
   } else if (cont_optimize) {
     GlobalMappingCallbacks::request_to_optimize();
   }
-  if (graph_editing) {
-    show_disabled_reason("Continuous optimization is unavailable while graph editing is in progress.");
-  } else {
+  if (!graph_editing) {
     show_note("Continuously optimize the graph.");
   }
   ImGui::EndDisabled();
 
   ImGui::End();
+}
+
+void InteractiveViewer::draw_submap_pruning_window() {
+  if (!show_submap_pruning_window) {
+    return;
+  }
+
+  if (current_graph_edit_state != GraphEditState::SESSION_MERGE_PENDING || session_merge_in_progress) {
+    show_submap_pruning_window = false;
+    prune_selection_mode = false;
+    return;
+  }
+
+  ImGui::SetNextWindowSize(ImVec2(420.0f, 300.0f), ImGuiCond_FirstUseEver);
+  if (!ImGui::Begin("Submap Pruning", &show_submap_pruning_window)) {
+    ImGui::End();
+    if (!show_submap_pruning_window) {
+      prune_selection_mode = false;
+    }
+    return;
+  }
+
+  ImGui::TextUnformatted("Right-click a target sphere to set range endpoints.");
+
+  ImGui::SetNextItemWidth(80.0f);
+  ImGui::InputInt("Start", &prune_start_input);
+  ImGui::SameLine();
+  ImGui::SetNextItemWidth(80.0f);
+  ImGui::InputInt("End", &prune_end_input);
+  ImGui::SameLine();
+  if (ImGui::Button("Add")) {
+    if (add_prune_range(prune_start_input, prune_end_input)) {
+      prune_range_start = -1;
+      prune_range_end = -1;
+      update_viewer();
+    }
+  }
+
+  ImGui::TextUnformatted("Prune ranges");
+  ImGui::BeginChild("prune_ranges", ImVec2(0.0f, 140.0f), true);
+  if (requested_prune_ranges.empty()) {
+    ImGui::TextDisabled("No ranges selected");
+  }
+
+  bool ranges_changed = false;
+  for (int i = 0; i < requested_prune_ranges.size(); i++) {
+    ImGui::PushID(i);
+    int endpoints[2] = {requested_prune_ranges[i].first, requested_prune_ranges[i].last};
+    ImGui::SetNextItemWidth(180.0f);
+    if (ImGui::InputInt2("##prune_range", endpoints)) {
+      if (is_prune_endpoint(endpoints[0]) && is_prune_endpoint(endpoints[1]) && submaps[endpoints[0]]->session_id == submaps[endpoints[1]]->session_id) {
+        if (endpoints[0] > endpoints[1]) {
+          std::swap(endpoints[0], endpoints[1]);
+        }
+        requested_prune_ranges[i] = {endpoints[0], endpoints[1]};
+        ranges_changed = true;
+      } else {
+        logger->warn("invalid prune range [{}, {}]", endpoints[0], endpoints[1]);
+      }
+    }
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Remove")) {
+      requested_prune_ranges.erase(requested_prune_ranges.begin() + i);
+      ranges_changed = true;
+      i--;
+    }
+    ImGui::PopID();
+  }
+  ImGui::EndChild();
+
+  if (ranges_changed) {
+    normalize_requested_prune_ranges();
+    update_viewer();
+  }
+
+  if (ImGui::Checkbox("Hide selected submaps", &hide_selected_submaps)) {
+    update_viewer();
+  }
+  ImGui::Text("Selected: %d submaps in %zu ranges", count_submaps(requested_prune_ranges), requested_prune_ranges.size());
+
+  ImGui::End();
+  if (!show_submap_pruning_window) {
+    prune_selection_mode = false;
+  }
 }
 
 bool InteractiveViewer::is_prune_endpoint(int submap_id) const {
@@ -534,6 +563,7 @@ void InteractiveViewer::begin_session_merge() {
   pending_merge_options->bridge_rotation_sigma = bridge_rotation_sigma_deg * DEG_TO_RAD;
   pending_merge_options->bridge_translation_sigma = bridge_translation_sigma;
 
+  show_submap_pruning_window = false;
   prune_selection_mode = false;
   session_merge_in_progress = true;
   logger->info("aligning sessions with {} target and {} source submaps", target_submaps.size(), source_submaps.size());
@@ -546,6 +576,7 @@ void InteractiveViewer::reset_graph_edit_ui() {
   prune_range_end = -1;
   prune_start_input = 0;
   prune_end_input = 0;
+  show_submap_pruning_window = false;
   prune_selection_mode = false;
   hide_selected_submaps = false;
   ensure_connected_graph = true;
@@ -625,6 +656,7 @@ void InteractiveViewer::run_modals() {
   if (alignment_cancelled && session_merge_in_progress) {
     pending_merge_options.reset();
     session_merge_in_progress = false;
+    show_submap_pruning_window = false;
     prune_selection_mode = false;
     logger->info("session merge alignment cancelled");
   }
