@@ -300,6 +300,7 @@ void GlobalMapping::insert_submap(int current, const SubMap::Ptr& submap) {
 
   submaps.push_back(submap);
   subsampled_submaps.push_back(subsampled_submap);
+  pruned_mask.resize(submaps.size(), 0);
 }
 
 void GlobalMapping::find_overlapping_submaps(double min_overlap) {
@@ -321,10 +322,7 @@ void GlobalMapping::find_overlapping_submaps(double min_overlap) {
   add_graph_factors(factors);
 }
 
-gtsam::NonlinearFactorGraph GlobalMapping::create_overlapping_factors(
-  const gtsam::Values& values,
-  const gtsam::NonlinearFactorGraph& factors,
-  double min_overlap) const {
+gtsam::NonlinearFactorGraph GlobalMapping::create_overlapping_factors(const gtsam::Values& values, const gtsam::NonlinearFactorGraph& factors, double min_overlap) const {
   gtsam::NonlinearFactorGraph overlapping_factors;
   if (submaps.empty()) {
     return overlapping_factors;
@@ -452,7 +450,9 @@ void GlobalMapping::optimize() {
   Callbacks::on_update_submaps(submaps);
 }
 
-GraphEditState GlobalMapping::graph_edit_state() const { return edit_state; }
+GraphEditState GlobalMapping::graph_edit_state() const {
+  return edit_state;
+}
 
 void GlobalMapping::merge_sessions(const SessionMergeOptions& options) {
   if (edit_state != GraphEditState::SESSION_MERGE_PENDING) {
@@ -464,14 +464,8 @@ void GlobalMapping::merge_sessions(const SessionMergeOptions& options) {
   gtsam::Values source_values = *new_values;
 
   try {
-    auto next_candidate = build_session_merge_candidate(
-      isam2->getFactorsUnsafe(),
-      isam2->calculateEstimate(),
-      source_factors,
-      source_values,
-      committed_submap_count,
-      submaps.size(),
-      options);
+    auto next_candidate =
+      build_session_merge_candidate(isam2->getFactorsUnsafe(), isam2->calculateEstimate(), source_factors, source_values, committed_submap_count, submaps.size(), options);
 
     candidate = std::make_unique<CandidateGraph>(std::move(next_candidate));
     edit_state = GraphEditState::CANDIDATE_EDITING;
@@ -511,6 +505,10 @@ bool GlobalMapping::try_commit_candidate() {
       isam2 = std::move(committed);
     }
     committed_submap_count = submaps.size();
+    pruned_ranges = union_submap_ranges(pruned_ranges, candidate->applied_prune_ranges);
+    pruned_ranges = union_submap_ranges(pruned_ranges, pending_source_pruned_ranges);
+    pending_source_pruned_ranges.clear();
+    rebuild_pruned_mask();
     candidate.reset();
     edit_state = GraphEditState::IDLE;
 
@@ -635,11 +633,30 @@ std::shared_ptr<gtsam::NonlinearFactorGraph> GlobalMapping::create_matching_cost
 
 void GlobalMapping::update_submaps() {
   for (int i = 0; i < submaps.size(); i++) {
-    if (!isam2->valueExists(X(i))) {
+    if (is_pruned(i) || !isam2->valueExists(X(i))) {
       continue;
     }
     submaps[i]->T_world_origin = Eigen::Isometry3d(isam2->calculateEstimate<gtsam::Pose3>(X(i)).matrix());
   }
+}
+
+void GlobalMapping::rebuild_pruned_mask() {
+  const auto ranges = union_submap_ranges(pruned_ranges, pending_source_pruned_ranges);
+  pruned_mask = submap_ranges_to_mask(ranges, submaps.size());
+}
+
+bool GlobalMapping::is_pruned(const int submap_id) const {
+  return is_submap_pruned(pruned_mask, submap_id);
+}
+
+int GlobalMapping::count_active_frames() const {
+  int count = 0;
+  for (int i = 0; i < submaps.size(); i++) {
+    if (!is_pruned(i)) {
+      count += submaps[i]->frames.size();
+    }
+  }
+  return count;
 }
 
 gtsam::ISAM2Params GlobalMapping::create_isam2_params() const {
@@ -711,10 +728,26 @@ void GlobalMapping::save(const std::string& path) {
 
   boost::filesystem::create_directories(path);
 
+  const auto pruned_keys = collect_submap_state_keys(submap_ranges_to_ids(pruned_ranges));
+  const auto active_factors = filter_factors_by_keys(isam2->getFactorsUnsafe(), pruned_keys);
+  const auto active_values = filter_values_by_keys(isam2->calculateEstimate(), pruned_keys);
+  try {
+    validate_factor_keys(active_factors, active_values);
+    find_unique_pose_gauge_anchor(active_factors);
+    for (int i = 0; i < submaps.size(); i++) {
+      if (!is_pruned(i) && !active_values.exists(X(i))) {
+        throw std::runtime_error("active submap pose is missing: X" + std::to_string(i));
+      }
+    }
+  } catch (const std::exception& e) {
+    logger->error("cannot save inconsistent graph: {}", e.what());
+    return;
+  }
+
   gtsam::NonlinearFactorGraph serializable_factors;
   std::unordered_map<std::string, gtsam::NonlinearFactor::shared_ptr> matching_cost_factors;
 
-  for (const auto& factor : isam2->getFactorsUnsafe()) {
+  for (const auto& factor : active_factors) {
     bool serializable = !dynamic_cast<gtsam_points::IntegratedMatchingCostFactor*>(factor.get())
 #ifdef GTSAM_POINTS_USE_CUDA
                         && !dynamic_cast<gtsam_points::IntegratedVGICPFactorGPU*>(factor.get())
@@ -734,12 +767,13 @@ void GlobalMapping::save(const std::string& path) {
 
   logger->info("serializing factor graph to {}/graph.bin", path);
   serializeToBinaryFile(serializable_factors, path + "/graph.bin");
-  serializeToBinaryFile(isam2->calculateEstimate(), path + "/values.bin");
+  serializeToBinaryFile(active_values, path + "/values.bin");
 
   GraphMetadata metadata;
   metadata.num_submaps = submaps.size();
   metadata.num_all_frames = std::accumulate(submaps.begin(), submaps.end(), 0, [](int sum, const SubMap::ConstPtr& submap) { return sum + submap->frames.size(); });
-  metadata.num_active_frames = metadata.num_all_frames;
+  metadata.num_active_frames = count_active_frames();
+  metadata.pruned_ranges = pruned_ranges;
   metadata.matching_cost_factors.reserve(matching_cost_factors.size());
   for (const auto& factor : matching_cost_factors) {
     std::string type;
@@ -776,30 +810,32 @@ void GlobalMapping::save(const std::string& path) {
   };
 
   for (int i = 0; i < submaps.size(); i++) {
-    for (const auto& frame : submaps[i]->odom_frames) {
-      write_tum_frame(odom_lidar_ofs, frame->stamp, frame->T_world_lidar);
-      write_tum_frame(odom_imu_ofs, frame->stamp, frame->T_world_imu);
+    if (!is_pruned(i)) {
+      for (const auto& frame : submaps[i]->odom_frames) {
+        write_tum_frame(odom_lidar_ofs, frame->stamp, frame->T_world_lidar);
+        write_tum_frame(odom_imu_ofs, frame->stamp, frame->T_world_imu);
+      }
+
+      const Eigen::Isometry3d T_world_endpoint_L = submaps[i]->T_world_origin * submaps[i]->T_origin_endpoint_L;
+      const Eigen::Isometry3d T_odom_lidar0 = submaps[i]->frames.front()->T_world_lidar;
+      const Eigen::Isometry3d T_odom_imu0 = submaps[i]->frames.front()->T_world_imu;
+
+      for (const auto& frame : submaps[i]->frames) {
+        const Eigen::Isometry3d T_world_imu = T_world_endpoint_L * T_odom_imu0.inverse() * frame->T_world_imu;
+        const Eigen::Isometry3d T_world_lidar = T_world_imu * frame->T_lidar_imu.inverse();
+
+        write_tum_frame(traj_imu_ofs, frame->stamp, T_world_imu);
+        write_tum_frame(traj_lidar_ofs, frame->stamp, T_world_lidar);
+      }
     }
 
-    const Eigen::Isometry3d T_world_endpoint_L = submaps[i]->T_world_origin * submaps[i]->T_origin_endpoint_L;
-    const Eigen::Isometry3d T_odom_lidar0 = submaps[i]->frames.front()->T_world_lidar;
-    const Eigen::Isometry3d T_odom_imu0 = submaps[i]->frames.front()->T_world_imu;
-
-    for (const auto& frame : submaps[i]->frames) {
-      const Eigen::Isometry3d T_world_imu = T_world_endpoint_L * T_odom_imu0.inverse() * frame->T_world_imu;
-      const Eigen::Isometry3d T_world_lidar = T_world_imu * frame->T_lidar_imu.inverse();
-
-      write_tum_frame(traj_imu_ofs, frame->stamp, T_world_imu);
-      write_tum_frame(traj_lidar_ofs, frame->stamp, T_world_lidar);
-    }
-
+    // Keep every archived submap directory so IDs remain stable across reloads.
     submaps[i]->save((boost::format("%s/%06d") % path % i).str());
   }
 
   logger->info("saving config");
   GlobalConfig::instance()->dump(path + "/config");
 }
-
 
 gtsam_points::PointCloud::Ptr GlobalMapping::export_points() {
   if (edit_state != GraphEditState::IDLE) {
@@ -810,7 +846,11 @@ gtsam_points::PointCloud::Ptr GlobalMapping::export_points() {
   auto merged = std::make_shared<gtsam_points::PointCloudCPU>();
 
   size_t total_points = 0;
-  for (const auto& submap : submaps) {
+  for (int i = 0; i < submaps.size(); i++) {
+    const auto& submap = submaps[i];
+    if (is_pruned(i)) {
+      continue;
+    }
     if (!submap || !submap->frame) {
       continue;
     }
@@ -821,7 +861,11 @@ gtsam_points::PointCloud::Ptr GlobalMapping::export_points() {
   points.reserve(total_points);
 
   bool export_intensities = true;
-  for (const auto& submap : submaps) {
+  for (int i = 0; i < submaps.size(); i++) {
+    const auto& submap = submaps[i];
+    if (is_pruned(i)) {
+      continue;
+    }
     if (!submap || !submap->frame || !submap->frame->has_intensities()) {
       export_intensities = false;
       break;
@@ -833,7 +877,11 @@ gtsam_points::PointCloud::Ptr GlobalMapping::export_points() {
     intensities.reserve(total_points);
   }
 
-  for (const auto& submap : submaps) {
+  for (int submap_id = 0; submap_id < submaps.size(); submap_id++) {
+    const auto& submap = submaps[submap_id];
+    if (is_pruned(submap_id)) {
+      continue;
+    }
     if (!submap || !submap->frame) {
       continue;
     }
@@ -881,6 +929,8 @@ bool GlobalMapping::load(const std::string& path) {
   const int start_from_frame_id = submaps.size();
   const int num_submaps = metadata.num_submaps;
   const auto& matching_cost_factors = metadata.matching_cost_factors;
+  const auto local_pruned_mask = submap_ranges_to_mask(metadata.pruned_ranges, num_submaps);
+  const auto loaded_pruned_ranges = offset_submap_ranges(metadata.pruned_ranges, start_from_frame_id);
 
   logger->info("Load submaps (session_id={})", session_id);
   submaps.reserve(submaps.size() + num_submaps);
@@ -935,6 +985,32 @@ bool GlobalMapping::load(const std::string& path) {
 
     Callbacks::on_insert_submap(submap);
   }
+
+  const int loaded_all_frames =
+    std::accumulate(submaps.begin() + start_from_frame_id, submaps.end(), 0, [](int sum, const SubMap::ConstPtr& submap) { return sum + submap->frames.size(); });
+  int loaded_active_frames = 0;
+  for (int i = 0; i < num_submaps; i++) {
+    if (!local_pruned_mask[i]) {
+      loaded_active_frames += submaps[start_from_frame_id + i]->frames.size();
+    }
+  }
+  if (loaded_all_frames != metadata.num_all_frames || loaded_active_frames != metadata.num_active_frames) {
+    logger->error(
+      "graph metadata frame counts do not match archived submaps (all: {} != {}, active: {} != {})",
+      metadata.num_all_frames,
+      loaded_all_frames,
+      metadata.num_active_frames,
+      loaded_active_frames);
+    return false;
+  }
+
+  if (start_from_frame_id == 0) {
+    pruned_ranges = loaded_pruned_ranges;
+    pending_source_pruned_ranges.clear();
+  } else {
+    pending_source_pruned_ranges = loaded_pruned_ranges;
+  }
+  rebuild_pruned_mask();
 
   gtsam::Values values, loaded_values;
   gtsam::NonlinearFactorGraph graph, loaded_graph;
@@ -1016,13 +1092,19 @@ bool GlobalMapping::load(const std::string& path) {
     values = loaded_values;
   }
 
+  const auto loaded_pruned_keys = collect_submap_state_keys(submap_ranges_to_ids(loaded_pruned_ranges));
+  graph = filter_factors_by_keys(graph, loaded_pruned_keys);
+  values = filter_values_by_keys(values, loaded_pruned_keys);
+
   logger->info("creating matching cost factors");
   for (const auto& factor : matching_cost_factors) {
     const auto& type = factor.type;
     const auto first = factor.first + start_from_frame_id;
     const auto second = factor.second + start_from_frame_id;
 
-    if (type == "vgicp" || type == "vgicp_gpu") {
+    if (type == "gicp") {
+      graph.emplace_shared<gtsam_points::IntegratedGICPFactor>(X(first), X(second), submaps[first]->frame, submaps[second]->frame);
+    } else if (type == "vgicp" || type == "vgicp_gpu") {
       if (params.enable_gpu) {
 #ifdef GTSAM_POINTS_USE_CUDA
         const auto stream_buffer = std::any_cast<std::shared_ptr<gtsam_points::StreamTempBufferRoundRobin>>(stream_buffer_roundrobin)->get_stream_buffer();
@@ -1060,6 +1142,22 @@ bool GlobalMapping::load(const std::string& path) {
 
     graph.add(recovered.first);
     values.insert_or_assign(recovered.second);
+  }
+
+  try {
+    validate_factor_keys(graph, values);
+    for (int i = 0; i < num_submaps; i++) {
+      const int submap_id = start_from_frame_id + i;
+      if (!local_pruned_mask[i] && !values.exists(X(submap_id))) {
+        throw std::runtime_error("active submap pose is missing: X" + std::to_string(submap_id));
+      }
+    }
+    if (start_from_frame_id == 0) {
+      find_unique_pose_gauge_anchor(graph);
+    }
+  } catch (const std::exception& e) {
+    logger->error("loaded graph is inconsistent: {}", e.what());
+    return false;
   }
 
   if (start_from_frame_id <= 0) {
@@ -1110,7 +1208,7 @@ std::pair<gtsam::NonlinearFactorGraph, gtsam::Values> GlobalMapping::recover_gra
   logger->info("enable_imu={}", enable_imu);
 
   logger->info("creating connectivity map");
-  bool prior_exists = false;
+  const bool pose_anchor_exists = !find_pose_gauge_anchors(graph).empty();
   std::unordered_map<gtsam::Key, std::set<gtsam::Key>> connectivity_map;
   for (const auto& factor : graph) {
     if (!factor) {
@@ -1122,10 +1220,6 @@ std::pair<gtsam::NonlinearFactorGraph, gtsam::Values> GlobalMapping::recover_gra
         connectivity_map[key].insert(key2);
       }
     }
-
-    if (factor->keys().size() == 1 && factor->keys()[0] == X(0)) {
-      prior_exists |= dynamic_cast<gtsam_points::LinearDampingFactor*>(factor.get()) != nullptr;
-    }
   }
 
   logger->info("fixing missing values and factors");
@@ -1135,18 +1229,27 @@ std::pair<gtsam::NonlinearFactorGraph, gtsam::Values> GlobalMapping::recover_gra
   gtsam::NonlinearFactorGraph new_factors;
   gtsam::Values new_values;
 
-  if (!prior_exists) {
-    logger->warn("X0 prior is missing");
-    new_factors.emplace_shared<gtsam_points::LinearDampingFactor>(X(0), 6, params.init_pose_damping_scale);
+  if (start_from_frame_id == 0 && !pose_anchor_exists) {
+    const auto first_active = std::find_if(pruned_mask.begin(), pruned_mask.end(), [](const uint8_t value) { return value == 0; });
+    if (first_active != pruned_mask.end()) {
+      const int anchor_id = std::distance(pruned_mask.begin(), first_active);
+      logger->warn("X{} prior is missing", anchor_id);
+      new_factors.emplace_shared<gtsam_points::LinearDampingFactor>(X(anchor_id), 6, params.init_pose_damping_scale);
+    }
   }
 
   for (int i = start_from_frame_id; i < submaps.size(); i++) {
+    if (is_pruned(i)) {
+      continue;
+    }
+
     if (!values.exists(X(i))) {
       logger->warn("X{} is missing", i);
       new_values.insert(X(i), gtsam::Pose3(submaps[i]->T_world_origin.matrix()));
     }
 
-    if (connectivity_map[X(i)].count(X(i + 1)) == 0 && i != submaps.size() - 1) {
+    const bool has_active_next = i + 1 < submaps.size() && !is_pruned(i + 1) && submaps[i]->session_id == submaps[i + 1]->session_id;
+    if (has_active_next && connectivity_map[X(i)].count(X(i + 1)) == 0) {
       logger->warn("X{} -> X{} is missing", i, i + 1);
 
       const Eigen::Isometry3d delta = submaps[i]->origin_odom_frame()->T_world_sensor().inverse() * submaps[i + 1]->origin_odom_frame()->T_world_sensor();
@@ -1163,7 +1266,8 @@ std::pair<gtsam::NonlinearFactorGraph, gtsam::Values> GlobalMapping::recover_gra
     const Eigen::Vector3d v_origin_imuL = submap->T_world_origin.linear().inverse() * submap->frames.front()->v_world_imu;
     const Eigen::Vector3d v_origin_imuR = submap->T_world_origin.linear().inverse() * submap->frames.back()->v_world_imu;
 
-    if (i != 0) {
+    const bool has_previous_in_session = i > 0 && submaps[i - 1]->session_id == submap->session_id;
+    if (has_previous_in_session) {
       if (!values.exists(E(i * 2))) {
         logger->warn("E{} is missing", i * 2);
         new_values.insert(E(i * 2), gtsam::Pose3((submap->T_world_origin * submap->T_origin_endpoint_L).matrix()));

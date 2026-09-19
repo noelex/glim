@@ -108,12 +108,12 @@ struct MatchingCostRecord {
  * @brief Parsed graph.txt metadata
  */
 struct GraphMetadata {
-  int version = 1;                                         ///< Metadata format version
-  int num_submaps = 0;                                     ///< Archived submaps, including pruned submaps
-  int num_all_frames = 0;                                  ///< All archived frames
-  int num_active_frames = 0;                               ///< Frames belonging to active submaps
-  std::vector<SubmapRange> pruned_ranges;                   ///< Canonical pruned submap ranges
-  std::vector<MatchingCostRecord> matching_cost_factors;    ///< Active matching-cost factor records
+  int version = 1;                                        ///< Metadata format version
+  int num_submaps = 0;                                    ///< Archived submaps, including pruned submaps
+  int num_all_frames = 0;                                 ///< All archived frames
+  int num_active_frames = 0;                              ///< Frames belonging to active submaps
+  std::vector<SubmapRange> pruned_ranges;                 ///< Canonical pruned submap ranges
+  std::vector<MatchingCostRecord> matching_cost_factors;  ///< Active matching-cost factor records
 };
 
 /**

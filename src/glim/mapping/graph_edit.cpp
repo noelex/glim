@@ -192,10 +192,7 @@ void ensure_pose_gauge_anchor(
   }
 }
 
-GraphConnectivity analyze_graph_connectivity(
-  const gtsam::Values& values,
-  const gtsam::NonlinearFactorGraph& factors,
-  const gtsam::Key anchor_key) {
+GraphConnectivity analyze_graph_connectivity(const gtsam::Values& values, const gtsam::NonlinearFactorGraph& factors, const gtsam::Key anchor_key) {
   validate_factor_keys(factors, values);
   if (!values.exists(anchor_key)) {
     throw std::invalid_argument("pose gauge anchor key is missing from values");
@@ -280,18 +277,23 @@ CandidateGraph build_session_merge_candidate(
   CandidateGraph candidate;
   candidate.source_begin = source_begin;
   candidate.requested_prune_ranges = normalize_submap_ranges(options.prune_ranges);
-  candidate.applied_prune_ranges = candidate.requested_prune_ranges;
   for (const auto& range : candidate.requested_prune_ranges) {
     if (range.last >= source_begin) {
       throw std::invalid_argument("prune range must only contain target submaps");
     }
   }
 
-  const auto pruned_ids = submap_ranges_to_ids(candidate.applied_prune_ranges);
+  std::vector<int> pruned_ids;
+  for (const int id : submap_ranges_to_ids(candidate.requested_prune_ranges)) {
+    if (target_values.exists(gtsam::Symbol('x', id))) {
+      pruned_ids.push_back(id);
+    }
+  }
+  candidate.applied_prune_ranges = submap_ids_to_ranges(pruned_ids);
   const auto pruned_keys = collect_submap_state_keys(pruned_ids);
   std::vector<int> active_target_submaps;
   for (int i = 0; i < source_begin; i++) {
-    if (!std::binary_search(pruned_ids.begin(), pruned_ids.end(), i)) {
+    if (target_values.exists(gtsam::Symbol('x', i)) && !std::binary_search(pruned_ids.begin(), pruned_ids.end(), i)) {
       active_target_submaps.push_back(i);
     }
   }
@@ -344,14 +346,13 @@ CandidateGraph build_session_merge_candidate(
   candidate.connectivity = analyze_graph_connectivity(candidate.values, candidate.factors, anchor.key);
 
   if (options.ensure_connected_graph && !candidate.connectivity.all_poses_reachable()) {
-    const gtsam::Vector6 sigmas =
-      (gtsam::Vector6() << options.bridge_rotation_sigma,
-       options.bridge_rotation_sigma,
-       options.bridge_rotation_sigma,
-       options.bridge_translation_sigma,
-       options.bridge_translation_sigma,
-       options.bridge_translation_sigma)
-        .finished();
+    const gtsam::Vector6 sigmas = (gtsam::Vector6() << options.bridge_rotation_sigma,
+                                   options.bridge_rotation_sigma,
+                                   options.bridge_rotation_sigma,
+                                   options.bridge_translation_sigma,
+                                   options.bridge_translation_sigma,
+                                   options.bridge_translation_sigma)
+                                    .finished();
     const auto noise = gtsam::noiseModel::Diagonal::Sigmas(sigmas);
 
     for (const auto& component : candidate.connectivity.components) {
@@ -378,6 +379,9 @@ CandidateGraph build_session_merge_candidate(
       for (const int target_id : component_targets) {
         const auto target = candidate.values.at<gtsam::Pose3>(gtsam::Symbol('x', target_id));
         for (int source_id = source_begin; source_id < total_submaps; source_id++) {
+          if (!candidate.values.exists(gtsam::Symbol('x', source_id))) {
+            continue;
+          }
           const auto source = candidate.values.at<gtsam::Pose3>(gtsam::Symbol('x', source_id));
           const double squared_distance = (target.translation() - source.translation()).squaredNorm();
           if (squared_distance < best_squared_distance) {
@@ -401,8 +405,8 @@ CandidateGraph build_session_merge_candidate(
   }
 
   if (!candidate.connectivity.all_poses_reachable()) {
-    candidate.diagnostic = "Graph has " + std::to_string(candidate.connectivity.pose_component_count) +
-                           " connected components. Add loop closures or find overlapping submaps before optimization.";
+    candidate.diagnostic =
+      "Graph has " + std::to_string(candidate.connectivity.pose_component_count) + " connected components. Add loop closures or find overlapping submaps before optimization.";
   }
 
   return candidate;
@@ -417,15 +421,12 @@ void append_candidate_factors(CandidateGraph& candidate, const gtsam::NonlinearF
   if (candidate.connectivity.all_poses_reachable()) {
     candidate.diagnostic.clear();
   } else {
-    candidate.diagnostic = "Graph has " + std::to_string(candidate.connectivity.pose_component_count) +
-                           " connected components. Add loop closures or find overlapping submaps before optimization.";
+    candidate.diagnostic =
+      "Graph has " + std::to_string(candidate.connectivity.pose_component_count) + " connected components. Add loop closures or find overlapping submaps before optimization.";
   }
 }
 
-TrialISAM2Build build_trial_isam2(
-  const gtsam::NonlinearFactorGraph& factors,
-  const gtsam::Values& values,
-  const gtsam::ISAM2Params& params) {
+TrialISAM2Build build_trial_isam2(const gtsam::NonlinearFactorGraph& factors, const gtsam::Values& values, const gtsam::ISAM2Params& params) {
   validate_factor_keys(factors, values);
 
   // iSAM2 can retain an unreferenced initial value without proving it is

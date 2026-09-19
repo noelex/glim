@@ -115,9 +115,7 @@ void test_invalid_metadata() {
   expect_throw([] { parse(""); }, "empty metadata must be rejected");
   expect_throw([] { parse("graph_metadata_version: 2\n"); }, "unknown metadata version must be rejected");
   expect_throw([] { parse("num_submaps: 2\nnum_all_frames: 4\n"); }, "truncated legacy metadata must be rejected");
-  expect_throw(
-    [] { parse("num_submaps: 2\nnum_all_frames: 4\nnum_matching_cost_factors: 1\nmatching_cost vgicp 0\n"); },
-    "truncated matching record must be rejected");
+  expect_throw([] { parse("num_submaps: 2\nnum_all_frames: 4\nnum_matching_cost_factors: 1\nmatching_cost vgicp 0\n"); }, "truncated matching record must be rejected");
   expect_throw([] { parse("num_submaps: 2 extra\nnum_all_frames: 4\nnum_matching_cost_factors: 0\n"); }, "extra values must be rejected");
   expect_throw(
     [] {

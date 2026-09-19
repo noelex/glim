@@ -328,8 +328,9 @@ void write_graph_metadata(std::ostream& stream, const GraphMetadata& metadata) {
   const auto pruned_ranges = normalize_submap_ranges(metadata.pruned_ranges);
   const auto pruned_mask = submap_ranges_to_mask(pruned_ranges, metadata.num_submaps);
   for (const auto& factor : metadata.matching_cost_factors) {
-    if (factor.first < 0 || factor.first >= metadata.num_submaps || factor.second < 0 || factor.second >= metadata.num_submaps || is_submap_pruned(pruned_mask, factor.first) ||
-        is_submap_pruned(pruned_mask, factor.second)) {
+    if (
+      factor.first < 0 || factor.first >= metadata.num_submaps || factor.second < 0 || factor.second >= metadata.num_submaps || is_submap_pruned(pruned_mask, factor.first) ||
+      is_submap_pruned(pruned_mask, factor.second)) {
       throw std::invalid_argument("matching_cost references a missing or pruned submap");
     }
   }

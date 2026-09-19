@@ -199,9 +199,7 @@ void test_connectivity() {
 
   gtsam::NonlinearFactorGraph missing_key_factor;
   missing_key_factor.emplace_shared<gtsam::BetweenFactor<gtsam::Pose3>>(X(0), X(9), gtsam::Pose3(), noise);
-  expect_throw<std::invalid_argument>(
-    [&] { glim::analyze_graph_connectivity(values, missing_key_factor, X(0)); },
-    "factor references to missing keys must be rejected");
+  expect_throw<std::invalid_argument>([&] { glim::analyze_graph_connectivity(values, missing_key_factor, X(0)); }, "factor references to missing keys must be rejected");
 }
 
 void test_trial_isam2_build() {
@@ -220,15 +218,11 @@ void test_trial_isam2_build() {
 
   gtsam::Values disconnected_values = values;
   disconnected_values.insert(X(2), gtsam::Pose3());
-  expect_throw<std::invalid_argument>(
-    [&] { glim::build_trial_isam2(factors, disconnected_values, gtsam::ISAM2Params()); },
-    "disconnected pose values must fail trial build");
+  expect_throw<std::invalid_argument>([&] { glim::build_trial_isam2(factors, disconnected_values, gtsam::ISAM2Params()); }, "disconnected pose values must fail trial build");
 
   gtsam::Values isolated_auxiliary = values;
   isolated_auxiliary.insert(V(0), gtsam::Vector3(0.0, 0.0, 0.0));
-  expect_throw(
-    [&] { glim::build_trial_isam2(factors, isolated_auxiliary, gtsam::ISAM2Params()); },
-    "unconstrained auxiliary values must fail trial build");
+  expect_throw([&] { glim::build_trial_isam2(factors, isolated_auxiliary, gtsam::ISAM2Params()); }, "unconstrained auxiliary values must fail trial build");
 
   gtsam::NonlinearFactorGraph underconstrained;
   underconstrained.emplace_shared<gtsam::PriorFactor<gtsam::Pose3>>(X(0), gtsam::Pose3(), noise);
@@ -291,8 +285,8 @@ void test_merge_candidate() {
   expect(!edited.connectivity.all_poses_reachable(), "a manual factor within one component must not hide a disconnected component");
 
   gtsam::NonlinearFactorGraph connecting_manual_factor;
-  connecting_manual_factor.emplace_shared<gtsam::BetweenFactor<gtsam::Pose3>>(
-    X(4), X(2), edited.values.at<gtsam::Pose3>(X(4)).between(edited.values.at<gtsam::Pose3>(X(2))), hard_noise);
+  connecting_manual_factor
+    .emplace_shared<gtsam::BetweenFactor<gtsam::Pose3>>(X(4), X(2), edited.values.at<gtsam::Pose3>(X(4)).between(edited.values.at<gtsam::Pose3>(X(2))), hard_noise);
   glim::append_candidate_factors(edited, connecting_manual_factor);
   expect(edited.connectivity.all_poses_reachable(), "manual factors failed to repair a disconnected candidate");
   expect(edited.diagnostic.empty(), "connected candidate retained a disconnected diagnostic");
@@ -314,13 +308,28 @@ void test_merge_candidate() {
   expect(ordinary_merge.values.size() == target_values.size() + source_values.size(), "ordinary merge lost values");
   expect(ordinary_merge.factors.size() == target_factors.size() + source_factors.size() + 1, "ordinary merge added unexpected factors");
 
-  options.merge_factor = gtsam::make_shared<gtsam::BetweenFactor<gtsam::Pose3>>(
-    X(3), X(0), gtsam::Pose3(gtsam::Rot3(), gtsam::Point3(-5.0, 0.0, 0.0)), hard_noise);
+  gtsam::Values target_with_historical_prune;
+  target_with_historical_prune.insert(X(0), target_values.at<gtsam::Pose3>(X(0)));
+  target_with_historical_prune.insert(X(2), target_values.at<gtsam::Pose3>(X(2)));
+  gtsam::NonlinearFactorGraph target_with_historical_prune_factors;
+  target_with_historical_prune_factors.emplace_shared<gtsam_points::LinearDampingFactor>(X(0), 6, 1e6);
+  target_with_historical_prune_factors
+    .emplace_shared<gtsam::BetweenFactor<gtsam::Pose3>>(X(0), X(2), target_values.at<gtsam::Pose3>(X(0)).between(target_values.at<gtsam::Pose3>(X(2))), hard_noise);
+  gtsam::Values source_with_historical_prune;
+  source_with_historical_prune.insert(X(3), source_values.at<gtsam::Pose3>(X(3)));
+  options.prune_ranges = {{1, 1}};
+  const auto historical = glim::build_session_merge_candidate(target_with_historical_prune_factors, target_with_historical_prune, {}, source_with_historical_prune, 3, 5, options);
+  expect(historical.requested_prune_ranges == std::vector<glim::SubmapRange>({{1, 1}}), "requested historical prune range was not retained");
+  expect(historical.applied_prune_ranges.empty(), "an already-pruned target must not be applied again");
+  expect(!historical.values.exists(X(1)) && !historical.values.exists(X(4)), "historically pruned poses were restored into the candidate");
+  expect(historical.connectivity.all_poses_reachable(), "historically pruned source or target broke candidate connectivity");
+
+  options.prune_ranges.clear();
+  options.merge_factor = gtsam::make_shared<gtsam::BetweenFactor<gtsam::Pose3>>(X(3), X(0), gtsam::Pose3(gtsam::Rot3(), gtsam::Point3(-5.0, 0.0, 0.0)), hard_noise);
   const auto reversed_merge = glim::build_session_merge_candidate(target_factors, target_values, source_factors, source_values, 3, 5, options);
   expect(reversed_merge.values.at<gtsam::Pose3>(X(3)).equals(ordinary_merge.values.at<gtsam::Pose3>(X(3))), "reversed merge factor changed the source transform");
 
-  options.merge_factor = gtsam::make_shared<gtsam::BetweenFactor<gtsam::Pose3>>(
-    X(0), X(3), gtsam::Pose3(gtsam::Rot3(), gtsam::Point3(5.0, 0.0, 0.0)), hard_noise);
+  options.merge_factor = gtsam::make_shared<gtsam::BetweenFactor<gtsam::Pose3>>(X(0), X(3), gtsam::Pose3(gtsam::Rot3(), gtsam::Point3(5.0, 0.0, 0.0)), hard_noise);
   options.prune_ranges = {{0, 0}};
   expect_throw<std::invalid_argument>(
     [&] { glim::build_session_merge_candidate(target_factors, target_values, source_factors, source_values, 3, 5, options); },

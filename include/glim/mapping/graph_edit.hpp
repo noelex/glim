@@ -152,10 +152,7 @@ struct GraphConnectivity {
  * @param anchor_key Full pose gauge anchor key
  * @return Complete key components and pose reachability diagnostics
  */
-GraphConnectivity analyze_graph_connectivity(
-  const gtsam::Values& values,
-  const gtsam::NonlinearFactorGraph& factors,
-  gtsam::Key anchor_key);
+GraphConnectivity analyze_graph_connectivity(const gtsam::Values& values, const gtsam::NonlinearFactorGraph& factors, gtsam::Key anchor_key);
 
 /**
  * @brief Result of building and validating a graph in a temporary iSAM2
@@ -173,9 +170,9 @@ struct SessionMergeOptions {
   gtsam::NonlinearFactor::shared_ptr merge_factor;  ///< User-confirmed target-to-source merge factor
   std::vector<SubmapRange> prune_ranges;            ///< Target submap ranges to prune
 
-  bool ensure_connected_graph = true;                 ///< Add soft bridge factors when needed
-  double bridge_rotation_sigma = 0.08726646259971647; ///< Soft bridge rotation sigma in radians
-  double bridge_translation_sigma = 0.5;              ///< Soft bridge translation sigma in meters
+  bool ensure_connected_graph = true;                  ///< Add soft bridge factors when needed
+  double bridge_rotation_sigma = 0.08726646259971647;  ///< Soft bridge rotation sigma in radians
+  double bridge_translation_sigma = 0.5;               ///< Soft bridge translation sigma in meters
 };
 
 /**
@@ -240,9 +237,6 @@ CandidateGraph build_session_merge_candidate(
  * intentionally propagated to the transaction caller. The active optimizer
  * is never accessed or modified by this function.
  */
-TrialISAM2Build build_trial_isam2(
-  const gtsam::NonlinearFactorGraph& factors,
-  const gtsam::Values& values,
-  const gtsam::ISAM2Params& params);
+TrialISAM2Build build_trial_isam2(const gtsam::NonlinearFactorGraph& factors, const gtsam::Values& values, const gtsam::ISAM2Params& params);
 
 }  // namespace glim
