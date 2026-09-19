@@ -190,7 +190,6 @@ bool is_submap_pruned(const std::vector<uint8_t>& mask, const int submap_id) {
 
 GraphMetadata parse_graph_metadata(std::istream& stream) {
   struct RequiredRecords {
-    bool version = false;
     bool num_submaps = false;
     bool num_all_frames = false;
     bool num_active_frames = false;
@@ -200,14 +199,13 @@ GraphMetadata parse_graph_metadata(std::istream& stream) {
   } seen;
 
   GraphMetadata metadata;
-  metadata.version = 0;
   int declared_matching_cost_factors = -1;
   int declared_pruned_submaps = -1;
   int declared_pruned_ranges = -1;
 
   std::string line;
   int line_number = 0;
-  bool first_record = true;
+  bool has_records = false;
   while (std::getline(stream, line)) {
     line_number++;
     std::istringstream line_stream(line);
@@ -215,44 +213,27 @@ GraphMetadata parse_graph_metadata(std::istream& stream) {
     if (!(line_stream >> record)) {
       continue;
     }
+    has_records = true;
 
-    if (first_record) {
-      first_record = false;
-      if (record == "graph_metadata_version:") {
-        set_once(seen.version, record, line_number);
-        parse_record(line_stream, line_number, metadata.version);
-        if (metadata.version != 1) {
-          throw std::runtime_error("unsupported graph metadata version " + std::to_string(metadata.version));
-        }
-        continue;
-      }
-    }
-
-    if (record == "graph_metadata_version:") {
-      throw std::runtime_error("graph_metadata_version must be the first record");
-    } else if (record == "num_submaps:") {
+    if (record == "num_submaps:") {
       set_once(seen.num_submaps, record, line_number);
       parse_record(line_stream, line_number, metadata.num_submaps);
     } else if (record == "num_all_frames:") {
       set_once(seen.num_all_frames, record, line_number);
       parse_record(line_stream, line_number, metadata.num_all_frames);
     } else if (record == "num_active_frames:") {
-      if (metadata.version == 0) throw std::runtime_error("num_active_frames is not valid in legacy graph metadata");
       set_once(seen.num_active_frames, record, line_number);
       parse_record(line_stream, line_number, metadata.num_active_frames);
     } else if (record == "num_matching_cost_factors:") {
       set_once(seen.num_matching_cost_factors, record, line_number);
       parse_record(line_stream, line_number, declared_matching_cost_factors);
     } else if (record == "num_pruned_submaps:") {
-      if (metadata.version == 0) throw std::runtime_error("num_pruned_submaps is not valid in legacy graph metadata");
       set_once(seen.num_pruned_submaps, record, line_number);
       parse_record(line_stream, line_number, declared_pruned_submaps);
     } else if (record == "num_pruned_ranges:") {
-      if (metadata.version == 0) throw std::runtime_error("num_pruned_ranges is not valid in legacy graph metadata");
       set_once(seen.num_pruned_ranges, record, line_number);
       parse_record(line_stream, line_number, declared_pruned_ranges);
     } else if (record == "pruned_range") {
-      if (metadata.version == 0) throw std::runtime_error("pruned_range is not valid in legacy graph metadata");
       SubmapRange range;
       parse_record(line_stream, line_number, range.first, range.last);
       metadata.pruned_ranges.push_back(range);
@@ -260,12 +241,12 @@ GraphMetadata parse_graph_metadata(std::istream& stream) {
       MatchingCostRecord factor;
       parse_record(line_stream, line_number, factor.type, factor.first, factor.second);
       metadata.matching_cost_factors.push_back(factor);
-    } else if (metadata.version == 0) {
-      throw std::runtime_error("unknown legacy graph metadata record " + record);
+    } else {
+      throw std::runtime_error("unknown graph metadata record " + record);
     }
   }
 
-  if (first_record) {
+  if (!has_records) {
     throw std::runtime_error("graph metadata is empty");
   }
   if (!seen.num_submaps || !seen.num_all_frames || !seen.num_matching_cost_factors) {
@@ -279,11 +260,12 @@ GraphMetadata parse_graph_metadata(std::istream& stream) {
     throw std::runtime_error("num_matching_cost_factors does not match matching_cost records");
   }
 
-  if (metadata.version == 0) {
+  const bool has_pruning_records = seen.num_active_frames || seen.num_pruned_submaps || seen.num_pruned_ranges || !metadata.pruned_ranges.empty();
+  if (!has_pruning_records) {
     metadata.num_active_frames = metadata.num_all_frames;
   } else {
     if (!seen.num_active_frames || !seen.num_pruned_submaps || !seen.num_pruned_ranges) {
-      throw std::runtime_error("graph metadata v1 is missing a required count record");
+      throw std::runtime_error("graph metadata is missing a required pruning count record");
     }
     validate_nonnegative(metadata.num_active_frames, "num_active_frames");
     validate_nonnegative(declared_pruned_submaps, "num_pruned_submaps");
@@ -318,9 +300,6 @@ GraphMetadata parse_graph_metadata(std::istream& stream) {
 }
 
 void write_graph_metadata(std::ostream& stream, const GraphMetadata& metadata) {
-  if (metadata.version != 1) {
-    throw std::invalid_argument("only graph metadata v1 can be written");
-  }
   if (metadata.num_submaps < 0 || metadata.num_all_frames < 0 || metadata.num_active_frames < 0 || metadata.num_active_frames > metadata.num_all_frames) {
     throw std::invalid_argument("invalid graph metadata counts");
   }
@@ -335,18 +314,17 @@ void write_graph_metadata(std::ostream& stream, const GraphMetadata& metadata) {
     }
   }
 
-  stream << "graph_metadata_version: 1\n";
   stream << "num_submaps: " << metadata.num_submaps << '\n';
   stream << "num_all_frames: " << metadata.num_all_frames << '\n';
+  stream << "num_matching_cost_factors: " << metadata.matching_cost_factors.size() << '\n';
+  for (const auto& factor : metadata.matching_cost_factors) {
+    stream << "matching_cost " << factor.type << ' ' << factor.first << ' ' << factor.second << '\n';
+  }
   stream << "num_active_frames: " << metadata.num_active_frames << '\n';
   stream << "num_pruned_submaps: " << count_submaps(pruned_ranges) << '\n';
   stream << "num_pruned_ranges: " << pruned_ranges.size() << '\n';
   for (const auto& range : pruned_ranges) {
     stream << "pruned_range " << range.first << ' ' << range.last << '\n';
-  }
-  stream << "num_matching_cost_factors: " << metadata.matching_cost_factors.size() << '\n';
-  for (const auto& factor : metadata.matching_cost_factors) {
-    stream << "matching_cost " << factor.type << ' ' << factor.first << ' ' << factor.second << '\n';
   }
 
   if (!stream) {

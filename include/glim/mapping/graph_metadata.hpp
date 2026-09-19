@@ -108,7 +108,6 @@ struct MatchingCostRecord {
  * @brief Parsed graph.txt metadata
  */
 struct GraphMetadata {
-  int version = 1;                                        ///< Metadata format version
   int num_submaps = 0;                                    ///< Archived submaps, including pruned submaps
   int num_all_frames = 0;                                 ///< All archived frames
   int num_active_frames = 0;                              ///< Frames belonging to active submaps
@@ -117,15 +116,15 @@ struct GraphMetadata {
 };
 
 /**
- * @brief Parse legacy v0 or versioned v1 graph metadata
+ * @brief Parse graph metadata with optional pruning records
  * @param stream Input graph.txt stream
  * @return Validated graph metadata
- * @throws std::runtime_error if the metadata is malformed or unsupported
+ * @throws std::runtime_error if the metadata is malformed
  */
 GraphMetadata parse_graph_metadata(std::istream& stream);
 
 /**
- * @brief Write graph metadata in v1 format
+ * @brief Write graph metadata
  * @param stream Output graph.txt stream
  * @param metadata Metadata to validate and write
  */

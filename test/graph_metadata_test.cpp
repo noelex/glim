@@ -65,7 +65,7 @@ void test_ranges() {
   expect_throw<std::out_of_range>([] { glim::submap_ranges_to_mask({{4, 5}}, 5); }, "out-of-bounds range must be rejected");
 }
 
-void test_legacy_metadata() {
+void test_metadata_without_pruning() {
   const auto metadata = parse(
     "num_submaps: 4\n"
     "num_all_frames: 20\n"
@@ -73,14 +73,13 @@ void test_legacy_metadata() {
     "matching_cost vgicp 0 1\n"
     "matching_cost vgicp_gpu 2 3\n");
 
-  expect(metadata.version == 0, "legacy metadata version is incorrect");
-  expect(metadata.num_submaps == 4, "legacy num_submaps is incorrect");
-  expect(metadata.num_active_frames == 20, "legacy active frame count must equal all frames");
-  expect(metadata.pruned_ranges.empty(), "legacy metadata must not contain pruned ranges");
-  expect(metadata.matching_cost_factors.size() == 2, "legacy matching cost records are missing");
+  expect(metadata.num_submaps == 4, "num_submaps is incorrect");
+  expect(metadata.num_active_frames == 20, "active frame count must equal all frames when pruning records are absent");
+  expect(metadata.pruned_ranges.empty(), "metadata without pruning records must not contain pruned ranges");
+  expect(metadata.matching_cost_factors.size() == 2, "matching cost records are missing");
 }
 
-void test_v1_round_trip() {
+void test_pruned_metadata_round_trip() {
   GraphMetadata input;
   input.num_submaps = 10;
   input.num_all_frames = 80;
@@ -91,43 +90,29 @@ void test_v1_round_trip() {
   std::ostringstream output;
   glim::write_graph_metadata(output, input);
   const std::string expected =
-    "graph_metadata_version: 1\n"
     "num_submaps: 10\n"
     "num_all_frames: 80\n"
+    "num_matching_cost_factors: 2\n"
+    "matching_cost vgicp 0 1\n"
+    "matching_cost vgicp_gpu 4 9\n"
     "num_active_frames: 55\n"
     "num_pruned_submaps: 3\n"
     "num_pruned_ranges: 2\n"
     "pruned_range 2 3\n"
-    "pruned_range 7 7\n"
-    "num_matching_cost_factors: 2\n"
-    "matching_cost vgicp 0 1\n"
-    "matching_cost vgicp_gpu 4 9\n";
-  expect(output.str() == expected, "v1 metadata records were not written in canonical order");
+    "pruned_range 7 7\n";
+  expect(output.str() == expected, "metadata records were not written in canonical order");
   const auto parsed = parse(output.str());
 
-  expect(parsed.version == 1, "v1 metadata version is incorrect");
-  expect(parsed.num_submaps == input.num_submaps, "v1 num_submaps changed during round trip");
-  expect(parsed.num_all_frames == input.num_all_frames, "v1 num_all_frames changed during round trip");
-  expect(parsed.num_active_frames == input.num_active_frames, "v1 num_active_frames changed during round trip");
-  expect(parsed.pruned_ranges == std::vector<SubmapRange>({{2, 3}, {7, 7}}), "v1 ranges were not canonicalized");
-  expect(parsed.matching_cost_factors == input.matching_cost_factors, "v1 matching records changed during round trip");
-
-  const auto with_unknown_record = parse(
-    "graph_metadata_version: 1\n"
-    "num_submaps: 2\n"
-    "future_record any values are skipped\n"
-    "num_all_frames: 4\n"
-    "num_active_frames: 4\n"
-    "num_matching_cost_factors: 0\n"
-    "num_pruned_submaps: 0\n"
-    "num_pruned_ranges: 0\n");
-  expect(with_unknown_record.num_submaps == 2, "unknown v1 record must not affect known records");
+  expect(parsed.num_submaps == input.num_submaps, "num_submaps changed during round trip");
+  expect(parsed.num_all_frames == input.num_all_frames, "num_all_frames changed during round trip");
+  expect(parsed.num_active_frames == input.num_active_frames, "num_active_frames changed during round trip");
+  expect(parsed.pruned_ranges == std::vector<SubmapRange>({{2, 3}, {7, 7}}), "ranges were not canonicalized");
+  expect(parsed.matching_cost_factors == input.matching_cost_factors, "matching records changed during round trip");
 }
 
 void test_invalid_metadata() {
   expect_throw([] { parse(""); }, "empty metadata must be rejected");
-  expect_throw([] { parse("graph_metadata_version: 2\n"); }, "unknown metadata version must be rejected");
-  expect_throw([] { parse("num_submaps: 2\nnum_all_frames: 4\n"); }, "truncated legacy metadata must be rejected");
+  expect_throw([] { parse("num_submaps: 2\nnum_all_frames: 4\n"); }, "truncated metadata must be rejected");
   expect_throw([] { parse("num_submaps: 2\nnum_all_frames: 4\nnum_matching_cost_factors: 1\nmatching_cost vgicp 0\n"); }, "truncated matching record must be rejected");
   expect_throw([] { parse("num_submaps: 2 extra\nnum_all_frames: 4\nnum_matching_cost_factors: 0\n"); }, "extra values must be rejected");
   expect_throw(
@@ -141,7 +126,6 @@ void test_invalid_metadata() {
   expect_throw(
     [] {
       parse(
-        "graph_metadata_version: 1\n"
         "num_submaps: 5\n"
         "num_all_frames: 10\n"
         "num_active_frames: 8\n"
@@ -154,7 +138,6 @@ void test_invalid_metadata() {
   expect_throw(
     [] {
       parse(
-        "graph_metadata_version: 1\n"
         "num_submaps: 5\n"
         "num_all_frames: 10\n"
         "num_active_frames: 8\n"
@@ -167,7 +150,6 @@ void test_invalid_metadata() {
   expect_throw(
     [] {
       parse(
-        "graph_metadata_version: 1\n"
         "num_submaps: 5\n"
         "num_all_frames: 10\n"
         "num_active_frames: 8\n"
@@ -180,7 +162,6 @@ void test_invalid_metadata() {
   expect_throw(
     [] {
       parse(
-        "graph_metadata_version: 1\n"
         "num_submaps: 5\n"
         "num_all_frames: 10\n"
         "num_active_frames: 8\n"
@@ -194,7 +175,6 @@ void test_invalid_metadata() {
   expect_throw(
     [] {
       parse(
-        "graph_metadata_version: 1\n"
         "num_submaps: 5\n"
         "num_all_frames: 10\n"
         "num_active_frames: 8\n"
@@ -208,7 +188,6 @@ void test_invalid_metadata() {
   expect_throw(
     [] {
       parse(
-        "graph_metadata_version: 1\n"
         "num_submaps: 5\n"
         "num_all_frames: 10\n"
         "num_active_frames: 10\n"
@@ -225,8 +204,8 @@ void test_invalid_metadata() {
 int main(int argc, char** argv) {
   try {
     test_ranges();
-    test_legacy_metadata();
-    test_v1_round_trip();
+    test_metadata_without_pruning();
+    test_pruned_metadata_round_trip();
     test_invalid_metadata();
 
     for (int i = 1; i < argc; i++) {
