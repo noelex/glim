@@ -23,6 +23,8 @@ class LevenbergMarquardtOptimizationStatus;
 
 namespace glim {
 
+struct SessionMergeOptions;
+
 /**
  * @brief Sub mapping-related callbacks
  *
@@ -137,6 +139,13 @@ struct GlobalMappingCallbacks {
    * @note  This is a special inverse-direction callback slot
    */
   static CallbackSlot<void()> request_to_optimize;
+
+  /**
+   * @brief Request committing the pending session merge as a graph transaction
+   * @param options Frozen session merge options
+   * @note  This is a special inverse-direction callback slot
+   */
+  static CallbackSlot<void(const SessionMergeOptions& options)> request_to_merge_sessions;
 
   /**
    * @brief Request the global mapping module to detect and recover from a graph corruption

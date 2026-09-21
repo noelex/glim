@@ -33,6 +33,8 @@
 #include <glim/util/serialization.hpp>
 #include <glim/common/imu_integration.hpp>
 #include <glim/mapping/callbacks.hpp>
+#include <glim/mapping/graph_edit.hpp>
+#include <glim/mapping/graph_metadata.hpp>
 
 #ifdef GTSAM_USE_TBB
 #include <tbb/task_arena.h>
@@ -87,18 +89,14 @@ GlobalMapping::GlobalMapping(const GlobalMappingParams& params) : params(params)
 #endif
 
   session_id = 0;
+  edit_state = GraphEditState::IDLE;
+  committed_submap_count = 0;
   imu_integration.reset(new IMUIntegration);
 
   new_values.reset(new gtsam::Values);
   new_factors.reset(new gtsam::NonlinearFactorGraph);
 
-  gtsam::ISAM2Params isam2_params;
-  if (params.use_isam2_dogleg) {
-    gtsam::ISAM2DoglegParams dogleg_params;
-    isam2_params.setOptimizationParams(dogleg_params);
-  }
-  isam2_params.relinearizeSkip = params.isam2_relinearize_skip;
-  isam2_params.setRelinearizeThreshold(params.isam2_relinearize_thresh);
+  const auto isam2_params = create_isam2_params();
 
   if (params.enable_optimization) {
     isam2.reset(new gtsam_points::ISAM2Ext(isam2_params));
@@ -125,6 +123,11 @@ void GlobalMapping::insert_imu(const double stamp, const Eigen::Vector3d& linear
 }
 
 void GlobalMapping::insert_submap(const SubMap::Ptr& submap) {
+  if (edit_state != GraphEditState::IDLE) {
+    logger->warn("cannot insert a submap while graph editing is in progress");
+    return;
+  }
+
   logger->debug("insert_submap id={} |frame|={}", submap->id, submap->frame->size());
 
   const int current = submaps.size();
@@ -228,6 +231,7 @@ void GlobalMapping::insert_submap(const SubMap::Ptr& submap) {
   new_factors.reset(new gtsam::NonlinearFactorGraph);
 
   update_submaps();
+  committed_submap_count = submaps.size();
   Callbacks::on_update_submaps(submaps);
 }
 
@@ -283,6 +287,11 @@ void GlobalMapping::insert_submap(int current, const SubMap::Ptr& submap) {
 }
 
 void GlobalMapping::find_overlapping_submaps(double min_overlap) {
+  if (edit_state != GraphEditState::IDLE) {
+    logger->warn("cannot find overlapping submaps while graph editing is in progress");
+    return;
+  }
+
   if (submaps.empty()) {
     return;
   }
@@ -358,6 +367,11 @@ void GlobalMapping::find_overlapping_submaps(double min_overlap) {
 }
 
 void GlobalMapping::optimize() {
+  if (edit_state != GraphEditState::IDLE) {
+    logger->warn("cannot optimize while graph editing is in progress");
+    return;
+  }
+
   if (isam2->empty()) {
     return;
   }
@@ -374,6 +388,77 @@ void GlobalMapping::optimize() {
 
   update_submaps();
   Callbacks::on_update_submaps(submaps);
+}
+
+GraphEditState GlobalMapping::graph_edit_state() const { return edit_state; }
+
+void GlobalMapping::merge_sessions(const SessionMergeOptions& options) {
+  if (edit_state != GraphEditState::SESSION_MERGE_PENDING) {
+    logger->warn("cannot merge sessions without a pending source session");
+    return;
+  }
+
+  // Let extensions contribute factors to the frozen source graph before
+  // candidate construction, while the active optimizer remains untouched.
+  gtsam::NonlinearFactorGraph source_factors = *new_factors;
+  gtsam::Values source_values = *new_values;
+  Callbacks::on_smoother_update(*isam2, source_factors, source_values);
+
+  try {
+    auto next_candidate = build_session_merge_candidate(
+      isam2->getFactorsUnsafe(),
+      isam2->calculateEstimate(),
+      source_factors,
+      source_values,
+      committed_submap_count,
+      submaps.size(),
+      options);
+
+    candidate = std::make_unique<CandidateGraph>(std::move(next_candidate));
+    edit_state = GraphEditState::CANDIDATE_EDITING;
+    new_factors->resize(0);
+    new_values->clear();
+  } catch (const std::exception& e) {
+    logger->error("failed to build session merge candidate: {}", e.what());
+    return;
+  }
+
+  if (!candidate->connectivity.all_poses_reachable()) {
+    logger->warn("session merge candidate is disconnected: {}", candidate->diagnostic);
+    return;
+  }
+
+  try {
+    TrialISAM2Build trial_build;
+#ifdef GTSAM_USE_TBB
+    auto arena = static_cast<tbb::task_arena*>(tbb_task_arena.get());
+    arena->execute([&] {
+#endif
+      trial_build = build_trial_isam2(candidate->factors, candidate->values, create_isam2_params());
+#ifdef GTSAM_USE_TBB
+    });
+#endif
+
+    auto committed_result = trial_build.update_result;
+    if (params.enable_optimization) {
+      isam2 = std::move(trial_build.optimizer);
+    } else {
+      auto committed = std::make_unique<gtsam_points::ISAM2ExtDummy>(create_isam2_params());
+      committed_result = committed->update(candidate->factors, candidate->values);
+      isam2 = std::move(committed);
+    }
+    committed_submap_count = submaps.size();
+    candidate.reset();
+    edit_state = GraphEditState::IDLE;
+
+    update_submaps();
+    Callbacks::on_smoother_update_result(*isam2, committed_result);
+    Callbacks::on_update_submaps(submaps);
+    logger->info("session merge committed");
+  } catch (const std::exception& e) {
+    candidate->diagnostic = e.what();
+    logger->error("session merge candidate failed trial iSAM2 build: {}", e.what());
+  }
 }
 
 std::shared_ptr<gtsam::NonlinearFactorGraph> GlobalMapping::create_between_factors(int current) const {
@@ -485,8 +570,22 @@ std::shared_ptr<gtsam::NonlinearFactorGraph> GlobalMapping::create_matching_cost
 
 void GlobalMapping::update_submaps() {
   for (int i = 0; i < submaps.size(); i++) {
+    if (!isam2->valueExists(X(i))) {
+      continue;
+    }
     submaps[i]->T_world_origin = Eigen::Isometry3d(isam2->calculateEstimate<gtsam::Pose3>(X(i)).matrix());
   }
+}
+
+gtsam::ISAM2Params GlobalMapping::create_isam2_params() const {
+  gtsam::ISAM2Params isam2_params;
+  if (params.use_isam2_dogleg) {
+    gtsam::ISAM2DoglegParams dogleg_params;
+    isam2_params.setOptimizationParams(dogleg_params);
+  }
+  isam2_params.relinearizeSkip = params.isam2_relinearize_skip;
+  isam2_params.setRelinearizeThreshold(params.isam2_relinearize_thresh);
+  return isam2_params;
 }
 
 gtsam_points::ISAM2ResultExt GlobalMapping::update_isam2(const gtsam::NonlinearFactorGraph& new_factors, const gtsam::Values& new_values) {
@@ -522,13 +621,7 @@ gtsam_points::ISAM2ResultExt GlobalMapping::update_isam2(const gtsam::NonlinearF
     gtsam::NonlinearFactorGraph factors = isam2->getFactorsUnsafe();
     factors.emplace_shared<gtsam_points::LinearDampingFactor>(indeterminant_nearby_key, 6, 1e3);
 
-    gtsam::ISAM2Params isam2_params;
-    if (params.use_isam2_dogleg) {
-      gtsam::ISAM2DoglegParams dogleg_params;
-      isam2_params.setOptimizationParams(dogleg_params);
-    }
-    isam2_params.relinearizeSkip = params.isam2_relinearize_skip;
-    isam2_params.setRelinearizeThreshold(params.isam2_relinearize_thresh);
+    const auto isam2_params = create_isam2_params();
 
     if (params.enable_optimization) {
       isam2.reset(new gtsam_points::ISAM2Ext(isam2_params));
@@ -544,6 +637,11 @@ gtsam_points::ISAM2ResultExt GlobalMapping::update_isam2(const gtsam::NonlinearF
 }
 
 void GlobalMapping::save(const std::string& path) {
+  if (edit_state != GraphEditState::IDLE) {
+    logger->error("cannot save while graph editing is in progress");
+    return;
+  }
+
   optimize();
 
   boost::filesystem::create_directories(path);
@@ -573,11 +671,11 @@ void GlobalMapping::save(const std::string& path) {
   serializeToBinaryFile(serializable_factors, path + "/graph.bin");
   serializeToBinaryFile(isam2->calculateEstimate(), path + "/values.bin");
 
-  std::ofstream ofs(path + "/graph.txt");
-  ofs << "num_submaps: " << submaps.size() << std::endl;
-  ofs << "num_all_frames: " << std::accumulate(submaps.begin(), submaps.end(), 0, [](int sum, const SubMap::ConstPtr& submap) { return sum + submap->frames.size(); }) << std::endl;
-
-  ofs << "num_matching_cost_factors: " << matching_cost_factors.size() << std::endl;
+  GraphMetadata metadata;
+  metadata.num_submaps = submaps.size();
+  metadata.num_all_frames = std::accumulate(submaps.begin(), submaps.end(), 0, [](int sum, const SubMap::ConstPtr& submap) { return sum + submap->frames.size(); });
+  metadata.num_active_frames = metadata.num_all_frames;
+  metadata.matching_cost_factors.reserve(matching_cost_factors.size());
   for (const auto& factor : matching_cost_factors) {
     std::string type;
 
@@ -594,8 +692,11 @@ void GlobalMapping::save(const std::string& path) {
 
     gtsam::Symbol symbol0(factor.second->keys()[0]);
     gtsam::Symbol symbol1(factor.second->keys()[1]);
-    ofs << "matching_cost " << type << " " << symbol0.index() << " " << symbol1.index() << std::endl;
+    metadata.matching_cost_factors.push_back({type, static_cast<int>(symbol0.index()), static_cast<int>(symbol1.index())});
   }
+
+  std::ofstream ofs(path + "/graph.txt");
+  write_graph_metadata(ofs, metadata);
 
   std::ofstream odom_lidar_ofs(path + "/odom_lidar.txt");
   std::ofstream traj_lidar_ofs(path + "/traj_lidar.txt");
@@ -636,6 +737,11 @@ void GlobalMapping::save(const std::string& path) {
 
 
 gtsam_points::PointCloud::Ptr GlobalMapping::export_points() {
+  if (edit_state != GraphEditState::IDLE) {
+    logger->error("cannot export points while graph editing is in progress");
+    return nullptr;
+  }
+
   auto merged = std::make_shared<gtsam_points::PointCloudCPU>();
 
   size_t total_points = 0;
@@ -688,26 +794,28 @@ gtsam_points::PointCloud::Ptr GlobalMapping::export_points() {
 }
 
 bool GlobalMapping::load(const std::string& path) {
+  if (edit_state != GraphEditState::IDLE) {
+    logger->error("cannot load another map while graph editing is in progress");
+    return false;
+  }
+
   std::ifstream ifs(path + "/graph.txt");
   if (!ifs) {
     logger->error("failed to open {}/graph.txt", path);
     return false;
   }
 
-  const int start_from_frame_id = submaps.size();
-
-  std::string token;
-  int num_submaps, num_all_frames, num_matching_cost_factors;
-
-  ifs >> token >> num_submaps;
-  ifs >> token >> num_all_frames;
-  ifs >> token >> num_matching_cost_factors;
-
-  std::vector<std::tuple<std::string, int, int>> matching_cost_factors(num_matching_cost_factors);
-  for (int i = 0; i < num_matching_cost_factors; i++) {
-    auto& factor = matching_cost_factors[i];
-    ifs >> token >> std::get<0>(factor) >> std::get<1>(factor) >> std::get<2>(factor);
+  GraphMetadata metadata;
+  try {
+    metadata = parse_graph_metadata(ifs);
+  } catch (const std::exception& e) {
+    logger->error("failed to parse {}/graph.txt: {}", path, e.what());
+    return false;
   }
+
+  const int start_from_frame_id = submaps.size();
+  const int num_submaps = metadata.num_submaps;
+  const auto& matching_cost_factors = metadata.matching_cost_factors;
 
   logger->info("Load submaps (session_id={})", session_id);
   submaps.reserve(submaps.size() + num_submaps);
@@ -845,9 +953,9 @@ bool GlobalMapping::load(const std::string& path) {
 
   logger->info("creating matching cost factors");
   for (const auto& factor : matching_cost_factors) {
-    const auto type = std::get<0>(factor);
-    const auto first = std::get<1>(factor) + start_from_frame_id;
-    const auto second = std::get<2>(factor) + start_from_frame_id;
+    const auto& type = factor.type;
+    const auto first = factor.first + start_from_frame_id;
+    const auto second = factor.second + start_from_frame_id;
 
     if (type == "vgicp" || type == "vgicp_gpu") {
       if (params.enable_gpu) {
@@ -896,11 +1004,13 @@ bool GlobalMapping::load(const std::string& path) {
     Callbacks::on_smoother_update_result(*isam2, result);
 
     update_submaps();
+    committed_submap_count = submaps.size();
     Callbacks::on_update_submaps(submaps);
   } else {
     logger->info("skip optimization");
     this->new_factors->add(graph);
     this->new_values->insert(values);
+    edit_state = GraphEditState::SESSION_MERGE_PENDING;
   }
 
   logger->info("done");
@@ -910,6 +1020,11 @@ bool GlobalMapping::load(const std::string& path) {
 }
 
 void GlobalMapping::recover_graph() {
+  if (edit_state != GraphEditState::IDLE) {
+    logger->warn("cannot recover while graph editing is in progress");
+    return;
+  }
+
   const auto recovered = recover_graph(isam2->getFactorsUnsafe(), isam2->calculateEstimate(), 0);
   update_isam2(recovered.first, recovered.second);
 }

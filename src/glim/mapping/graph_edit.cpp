@@ -259,6 +259,115 @@ gtsam::Values transform_session_values(const gtsam::Values& values, const gtsam:
   return transformed;
 }
 
+CandidateGraph build_session_merge_candidate(
+  const gtsam::NonlinearFactorGraph& target_factors,
+  const gtsam::Values& target_values,
+  const gtsam::NonlinearFactorGraph& source_factors,
+  const gtsam::Values& source_values,
+  const int source_begin,
+  const int total_submaps,
+  const SessionMergeOptions& options) {
+  if (source_begin <= 0 || source_begin >= total_submaps) {
+    throw std::invalid_argument("session merge candidate requires non-empty target and source sessions");
+  }
+  if (!options.merge_factor) {
+    throw std::invalid_argument("session merge candidate requires a merge factor");
+  }
+
+  validate_factor_keys(target_factors, target_values);
+  validate_factor_keys(source_factors, source_values);
+  const auto original_anchors = find_pose_gauge_anchors(target_factors);
+
+  CandidateGraph candidate;
+  candidate.requested_prune_ranges = normalize_submap_ranges(options.prune_ranges);
+  for (const auto& range : candidate.requested_prune_ranges) {
+    if (range.last >= total_submaps) {
+      throw std::invalid_argument("prune range exceeds the pending sessions");
+    }
+  }
+
+  std::vector<int> pruned_ids;
+  for (const int id : submap_ranges_to_ids(candidate.requested_prune_ranges)) {
+    const auto key = gtsam::Symbol('x', id);
+    if ((id < source_begin && target_values.exists(key)) || (id >= source_begin && source_values.exists(key))) {
+      pruned_ids.push_back(id);
+    }
+  }
+  candidate.applied_prune_ranges = submap_ids_to_ranges(pruned_ids);
+  const auto pruned_keys = collect_submap_state_keys(pruned_ids);
+  std::vector<int> active_target_submaps;
+  for (int i = 0; i < source_begin; i++) {
+    if (target_values.exists(gtsam::Symbol('x', i)) && !std::binary_search(pruned_ids.begin(), pruned_ids.end(), i)) {
+      active_target_submaps.push_back(i);
+    }
+  }
+  if (active_target_submaps.empty()) {
+    throw std::invalid_argument("session merge candidate must retain at least one active target submap");
+  }
+  bool has_active_source_submap = false;
+  for (int i = source_begin; i < total_submaps; i++) {
+    if (source_values.exists(gtsam::Symbol('x', i)) && !std::binary_search(pruned_ids.begin(), pruned_ids.end(), i)) {
+      has_active_source_submap = true;
+      break;
+    }
+  }
+  if (!has_active_source_submap) {
+    throw std::invalid_argument("session merge candidate must retain at least one active source submap");
+  }
+
+  const auto merge_factor = dynamic_cast<const gtsam::BetweenFactor<gtsam::Pose3>*>(options.merge_factor.get());
+  if (!merge_factor) {
+    throw std::invalid_argument("merge factor must be BetweenFactor<Pose3>");
+  }
+  const gtsam::Symbol first_symbol(merge_factor->key1());
+  const gtsam::Symbol second_symbol(merge_factor->key2());
+  if (first_symbol.chr() != 'x' || second_symbol.chr() != 'x') {
+    throw std::invalid_argument("merge factor must connect two submap poses");
+  }
+
+  const bool first_is_target = first_symbol.index() < static_cast<size_t>(source_begin);
+  const bool second_is_target = second_symbol.index() < static_cast<size_t>(source_begin);
+  if (first_is_target == second_is_target) {
+    throw std::invalid_argument("merge factor must connect target and source sessions");
+  }
+
+  const gtsam::Key target_key = first_is_target ? merge_factor->key1() : merge_factor->key2();
+  const gtsam::Key source_key = first_is_target ? merge_factor->key2() : merge_factor->key1();
+  if (gtsam::Symbol(source_key).index() >= static_cast<size_t>(total_submaps)) {
+    throw std::invalid_argument("merge factor source is outside the pending source session");
+  }
+  if (pruned_keys.count(target_key) || pruned_keys.count(source_key)) {
+    throw std::invalid_argument("merge factor references a pruned submap");
+  }
+  if (!target_values.exists(target_key) || !source_values.exists(source_key)) {
+    throw std::invalid_argument("merge factor references a missing pose value");
+  }
+
+  const gtsam::Pose3 target_pose = target_values.at<gtsam::Pose3>(target_key);
+  const gtsam::Pose3 source_pose = source_values.at<gtsam::Pose3>(source_key);
+  const gtsam::Pose3 target_T_source = first_is_target ? merge_factor->measured() : merge_factor->measured().inverse();
+  const gtsam::Pose3 world_target_T_world_source = target_pose * target_T_source * source_pose.inverse();
+  const auto filtered_source_values = filter_values_by_keys(source_values, pruned_keys);
+  const auto transformed_source_values = transform_session_values(filtered_source_values, world_target_T_world_source);
+
+  candidate.factors = filter_factors_by_keys(target_factors, pruned_keys);
+  candidate.values = filter_values_by_keys(target_values, pruned_keys);
+  candidate.factors.add(filter_factors_by_keys(source_factors, pruned_keys));
+  candidate.values.insert(transformed_source_values);
+  candidate.factors.push_back(options.merge_factor);
+
+  ensure_pose_gauge_anchor(candidate.factors, candidate.values, original_anchors, active_target_submaps);
+  const auto anchor_key = select_pose_gauge_anchor_key(find_pose_gauge_anchors(candidate.factors));
+  candidate.connectivity = analyze_graph_connectivity(candidate.values, candidate.factors, anchor_key);
+
+  if (!candidate.connectivity.all_poses_reachable()) {
+    candidate.diagnostic =
+      "Graph has " + std::to_string(candidate.connectivity.pose_component_count) + " connected components. Add loop closures or find overlapping submaps to connect the graph.";
+  }
+
+  return candidate;
+}
+
 TrialISAM2Build build_trial_isam2(const gtsam::NonlinearFactorGraph& factors, const gtsam::Values& values, const gtsam::ISAM2Params& params) {
   validate_factor_keys(factors, values);
 

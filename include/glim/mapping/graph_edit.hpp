@@ -21,6 +21,15 @@
 namespace glim {
 
 /**
+ * @brief State of the graph editing workflow
+ */
+enum class GraphEditState {
+  IDLE,
+  SESSION_MERGE_PENDING,
+  CANDIDATE_EDITING,
+};
+
+/**
  * @brief Keys owned by one submap
  *
  * A submap owns one origin pose and two endpoint pose, velocity, and bias states.
@@ -155,12 +164,55 @@ struct TrialISAM2Build {
 };
 
 /**
+ * @brief Options captured when committing a pending session merge
+ */
+struct SessionMergeOptions {
+  gtsam::NonlinearFactor::shared_ptr merge_factor;  ///< User-confirmed target-to-source merge factor
+  std::vector<SubmapRange> prune_ranges;            ///< Target and source submap ranges to prune
+};
+
+/**
+ * @brief Candidate graph produced by a graph edit transaction
+ */
+struct CandidateGraph {
+  gtsam::NonlinearFactorGraph factors;
+  gtsam::Values values;
+
+  std::vector<SubmapRange> requested_prune_ranges;
+  std::vector<SubmapRange> applied_prune_ranges;
+
+  GraphConnectivity connectivity;
+
+  std::string diagnostic;
+};
+
+/**
  * @brief Apply a global rigid transform to a session's complete state
  * @param values Session values
  * @param transform Global transform applied to X/E and whose rotation is applied to V
  * @return Transformed values with biases and unknown value types unchanged
  */
 gtsam::Values transform_session_values(const gtsam::Values& values, const gtsam::Pose3& transform);
+
+/**
+ * @brief Build a filtered session merge candidate without modifying the target graph
+ * @param target_factors Current target graph factors
+ * @param target_values Current target graph values
+ * @param source_factors Additional source session factors
+ * @param source_values Additional source session values
+ * @param source_begin First submap ID owned by the source session
+ * @param total_submaps Total target and source submap count
+ * @param options Frozen session merge options
+ * @return Candidate graph and connectivity diagnostics
+ */
+CandidateGraph build_session_merge_candidate(
+  const gtsam::NonlinearFactorGraph& target_factors,
+  const gtsam::Values& target_values,
+  const gtsam::NonlinearFactorGraph& source_factors,
+  const gtsam::Values& source_values,
+  int source_begin,
+  int total_submaps,
+  const SessionMergeOptions& options);
 
 /**
  * @brief Build and validate a graph in a fresh iSAM2 instance
