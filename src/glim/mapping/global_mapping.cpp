@@ -394,6 +394,7 @@ void GlobalMapping::add_graph_factors(const gtsam::NonlinearFactorGraph& factors
       try_commit_candidate();
     } catch (const std::exception& e) {
       candidate->diagnostic = e.what();
+      notify_candidate_graph();
       logger->error("failed to add factors to candidate: {}", e.what());
     }
     return;
@@ -437,6 +438,19 @@ GraphEditState GlobalMapping::graph_edit_state() const {
   return edit_state;
 }
 
+void GlobalMapping::notify_graph_edit_state() const {
+  auto unavailable_ranges = union_submap_ranges(pruned_ranges, pending_source_pruned_ranges);
+  if (candidate) {
+    unavailable_ranges = union_submap_ranges(unavailable_ranges, candidate->applied_prune_ranges);
+  }
+  const auto unavailable_mask = submap_ranges_to_mask(unavailable_ranges, submaps.size());
+  Callbacks::on_graph_edit_state_changed(edit_state, unavailable_mask);
+}
+
+void GlobalMapping::notify_candidate_graph() const {
+  Callbacks::on_candidate_graph_updated(*candidate);
+}
+
 void GlobalMapping::merge_sessions(const SessionMergeOptions& options) {
   if (edit_state != GraphEditState::SESSION_MERGE_PENDING) {
     logger->warn("cannot merge sessions without a pending source session");
@@ -451,11 +465,17 @@ void GlobalMapping::merge_sessions(const SessionMergeOptions& options) {
       build_session_merge_candidate(isam2->getFactorsUnsafe(), isam2->calculateEstimate(), source_factors, source_values, committed_submap_count, submaps.size(), options);
 
     candidate = std::make_unique<CandidateGraph>(std::move(next_candidate));
+    logger->info(
+      "session merge candidate: pruned {} submap(s), {} connected component(s)",
+      count_submaps(candidate->applied_prune_ranges),
+      candidate->connectivity.pose_component_count);
     edit_state = GraphEditState::CANDIDATE_EDITING;
     new_factors->resize(0);
     new_values->clear();
+    notify_graph_edit_state();
   } catch (const std::exception& e) {
     logger->error("failed to build session merge candidate: {}", e.what());
+    notify_graph_edit_state();
     return;
   }
 
@@ -464,7 +484,8 @@ void GlobalMapping::merge_sessions(const SessionMergeOptions& options) {
 
 bool GlobalMapping::try_commit_candidate() {
   if (!candidate->connectivity.all_poses_reachable()) {
-    logger->warn("session merge candidate is disconnected: {}", candidate->diagnostic);
+    notify_candidate_graph();
+    logger->warn("candidate graph is disconnected: {}", candidate->diagnostic);
     return false;
   }
 
@@ -492,17 +513,26 @@ bool GlobalMapping::try_commit_candidate() {
     pruned_ranges = union_submap_ranges(pruned_ranges, pending_source_pruned_ranges);
     pending_source_pruned_ranges.clear();
     rebuild_pruned_mask();
+    notify_candidate_graph();
     candidate.reset();
     edit_state = GraphEditState::IDLE;
+    notify_graph_edit_state();
 
     update_submaps();
     Callbacks::on_smoother_update_result(*isam2, committed_result);
     Callbacks::on_update_submaps(submaps);
-    logger->info("session merge committed");
+    logger->info("candidate graph committed");
     return true;
+  } catch (const gtsam::IndeterminantLinearSystemException& e) {
+    const auto nearby = gtsam::DefaultKeyFormatter(e.nearbyVariable());
+    candidate->diagnostic = "Candidate graph is connected but still underconstrained near " + nearby + ". Add additional loop closures or find overlapping submaps.";
+    notify_candidate_graph();
+    logger->error("candidate graph failed trial iSAM2 build: {}", e.what());
+    return false;
   } catch (const std::exception& e) {
     candidate->diagnostic = e.what();
-    logger->error("session merge candidate failed trial iSAM2 build: {}", e.what());
+    notify_candidate_graph();
+    logger->error("candidate graph failed trial iSAM2 build: {}", e.what());
     return false;
   }
 }
@@ -1161,6 +1191,7 @@ bool GlobalMapping::load(const std::string& path) {
 
   logger->info("done");
   session_id++;
+  notify_graph_edit_state();
 
   return true;
 }

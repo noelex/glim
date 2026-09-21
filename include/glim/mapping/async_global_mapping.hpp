@@ -106,6 +106,12 @@ private:
   std::mutex global_mapping_mutex;
   std::shared_ptr<glim::GlobalMappingBase> global_mapping;
 
+  int optimize_callback_id;
+  int graph_factors_callback_id;
+  int merge_sessions_callback_id;
+  int recover_callback_id;
+  int find_overlaps_callback_id;
+
   // Logging
   std::shared_ptr<spdlog::logger> logger;
 };

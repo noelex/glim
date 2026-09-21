@@ -89,6 +89,8 @@ private:
   gtsam::NonlinearFactorGraph create_overlapping_factors(const gtsam::Values& values, const gtsam::NonlinearFactorGraph& factors, double min_overlap) const;
 
   void update_submaps();
+  void notify_graph_edit_state() const;
+  void notify_candidate_graph() const;
   void rebuild_pruned_mask();
   bool is_pruned(int submap_id) const;
   int count_active_frames() const;
