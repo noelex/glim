@@ -287,22 +287,36 @@ void GlobalMapping::insert_submap(int current, const SubMap::Ptr& submap) {
 }
 
 void GlobalMapping::find_overlapping_submaps(double min_overlap) {
-  if (edit_state != GraphEditState::IDLE) {
-    logger->warn("cannot find overlapping submaps while graph editing is in progress");
+  if (edit_state == GraphEditState::SESSION_MERGE_PENDING) {
+    logger->warn("cannot find overlapping submaps before the pending session merge is created");
     return;
   }
 
+  if (edit_state == GraphEditState::CANDIDATE_EDITING) {
+    auto factors = create_overlapping_factors(candidate->values, candidate->factors, min_overlap);
+    logger->info("new overlapping {} factors found", factors.size());
+    add_graph_factors(factors);
+    return;
+  }
+
+  const auto values = isam2->calculateEstimate();
+  auto factors = create_overlapping_factors(values, isam2->getFactorsUnsafe(), min_overlap);
+  logger->info("new overlapping {} factors found", factors.size());
+  add_graph_factors(factors);
+}
+
+gtsam::NonlinearFactorGraph GlobalMapping::create_overlapping_factors(
+  const gtsam::Values& values,
+  const gtsam::NonlinearFactorGraph& factors,
+  double min_overlap) const {
+  gtsam::NonlinearFactorGraph overlapping_factors;
   if (submaps.empty()) {
-    return;
+    return overlapping_factors;
   }
 
-  // Between factors are Vector2i actually. A bad use of Vector3i
-  std::unordered_set<Eigen::Vector3i, gtsam_points::Vector3iHash> existing_factors;
-  for (const auto& factor : isam2->getFactorsUnsafe()) {
-    if (factor == nullptr) {
-      continue;
-    }
-    if (factor->keys().size() != 2) {
+  std::unordered_set<Eigen::Vector3i, gtsam_points::Vector3iHash> existing_factor_pairs;
+  for (const auto& factor : factors) {
+    if (!factor || factor->keys().size() != 2) {
       continue;
     }
 
@@ -312,17 +326,27 @@ void GlobalMapping::find_overlapping_submaps(double min_overlap) {
       continue;
     }
 
-    existing_factors.emplace(sym1.index(), sym2.index(), 0);
+    const int first = std::min(sym1.index(), sym2.index());
+    const int second = std::max(sym1.index(), sym2.index());
+    existing_factor_pairs.emplace(first, second, 0);
   }
 
   double squared_max_implicit_loop_distance = params.max_implicit_loop_distance * params.max_implicit_loop_distance;
   for (int i = 0; i < submaps.size(); i++) {
+    if (!values.exists(X(i))) {
+      continue;
+    }
+
     for (int j = i + 1; j < submaps.size(); j++) {
-      if (existing_factors.count(Eigen::Vector3i(i, j, 0))) {
+      if (!values.exists(X(j))) {
+        continue;
+      }
+      if (existing_factor_pairs.count(Eigen::Vector3i(i, j, 0))) {
         continue;
       }
 
-      const Eigen::Isometry3d delta = submaps[i]->T_world_origin.inverse() * submaps[j]->T_world_origin;
+      const gtsam::Pose3 delta_pose = values.at<gtsam::Pose3>(X(i)).between(values.at<gtsam::Pose3>(X(j)));
+      const Eigen::Isometry3d delta(delta_pose.matrix());
       const double squared_dist = delta.translation().squaredNorm();
       if (squared_dist > squared_max_implicit_loop_distance) {
         continue;
@@ -341,26 +365,47 @@ void GlobalMapping::find_overlapping_submaps(double min_overlap) {
         const auto& stream = stream_buffer.first;
         const auto& buffer = stream_buffer.second;
         for (const auto& voxelmap : submaps[i]->voxelmaps) {
-          new_factors->emplace_shared<gtsam_points::IntegratedVGICPFactorGPU>(X(i), X(j), voxelmap, subsampled_submaps[j], stream, buffer);
+          overlapping_factors.emplace_shared<gtsam_points::IntegratedVGICPFactorGPU>(X(i), X(j), voxelmap, subsampled_submaps[j], stream, buffer);
         }
       }
 #endif
       else {
         for (const auto& voxelmap : submaps[i]->voxelmaps) {
-          new_factors->emplace_shared<gtsam_points::IntegratedVGICPFactor>(X(i), X(j), voxelmap, subsampled_submaps[j]);
+          overlapping_factors.emplace_shared<gtsam_points::IntegratedVGICPFactor>(X(i), X(j), voxelmap, subsampled_submaps[j]);
         }
       }
     }
   }
 
-  logger->info("new overlapping {} submap pairs found", new_factors->size());
+  return overlapping_factors;
+}
 
-  Callbacks::on_smoother_update(*isam2, *new_factors, *new_values);
-  auto result = update_isam2(*new_factors, *new_values);
+void GlobalMapping::add_graph_factors(const gtsam::NonlinearFactorGraph& factors) {
+  if (factors.empty()) {
+    return;
+  }
+
+  if (edit_state == GraphEditState::SESSION_MERGE_PENDING) {
+    logger->warn("cannot add graph factors before the pending session merge is created");
+    return;
+  }
+
+  if (edit_state == GraphEditState::CANDIDATE_EDITING) {
+    try {
+      append_candidate_factors(*candidate, factors);
+      try_commit_candidate();
+    } catch (const std::exception& e) {
+      candidate->diagnostic = e.what();
+      logger->error("failed to add factors to candidate: {}", e.what());
+    }
+    return;
+  }
+
+  gtsam::NonlinearFactorGraph added_factors = factors;
+  gtsam::Values added_values;
+  Callbacks::on_smoother_update(*isam2, added_factors, added_values);
+  auto result = update_isam2(added_factors, added_values);
   Callbacks::on_smoother_update_result(*isam2, result);
-
-  new_factors->resize(0);
-  new_values->clear();
 
   update_submaps();
   Callbacks::on_update_submaps(submaps);
@@ -398,11 +443,8 @@ void GlobalMapping::merge_sessions(const SessionMergeOptions& options) {
     return;
   }
 
-  // Let extensions contribute factors to the frozen source graph before
-  // candidate construction, while the active optimizer remains untouched.
   gtsam::NonlinearFactorGraph source_factors = *new_factors;
   gtsam::Values source_values = *new_values;
-  Callbacks::on_smoother_update(*isam2, source_factors, source_values);
 
   try {
     auto next_candidate = build_session_merge_candidate(
@@ -423,9 +465,13 @@ void GlobalMapping::merge_sessions(const SessionMergeOptions& options) {
     return;
   }
 
+  try_commit_candidate();
+}
+
+bool GlobalMapping::try_commit_candidate() {
   if (!candidate->connectivity.all_poses_reachable()) {
     logger->warn("session merge candidate is disconnected: {}", candidate->diagnostic);
-    return;
+    return false;
   }
 
   try {
@@ -455,9 +501,11 @@ void GlobalMapping::merge_sessions(const SessionMergeOptions& options) {
     Callbacks::on_smoother_update_result(*isam2, committed_result);
     Callbacks::on_update_submaps(submaps);
     logger->info("session merge committed");
+    return true;
   } catch (const std::exception& e) {
     candidate->diagnostic = e.what();
     logger->error("session merge candidate failed trial iSAM2 build: {}", e.what());
+    return false;
   }
 }
 

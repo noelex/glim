@@ -368,6 +368,20 @@ CandidateGraph build_session_merge_candidate(
   return candidate;
 }
 
+void append_candidate_factors(CandidateGraph& candidate, const gtsam::NonlinearFactorGraph& factors) {
+  validate_factor_keys(factors, candidate.values);
+  candidate.factors.add(factors);
+
+  const auto anchor_key = select_pose_gauge_anchor_key(find_pose_gauge_anchors(candidate.factors));
+  candidate.connectivity = analyze_graph_connectivity(candidate.values, candidate.factors, anchor_key);
+  if (candidate.connectivity.all_poses_reachable()) {
+    candidate.diagnostic.clear();
+  } else {
+    candidate.diagnostic =
+      "Graph has " + std::to_string(candidate.connectivity.pose_component_count) + " connected components. Add loop closures or find overlapping submaps to connect the graph.";
+  }
+}
+
 TrialISAM2Build build_trial_isam2(const gtsam::NonlinearFactorGraph& factors, const gtsam::Values& values, const gtsam::ISAM2Params& params) {
   validate_factor_keys(factors, values);
 

@@ -100,6 +100,8 @@ private:
   std::atomic<double> request_to_find_overlapping_submaps;
   std::mutex merge_request_mutex;
   std::optional<SessionMergeOptions> merge_request;
+  std::mutex graph_factors_request_mutex;
+  gtsam::NonlinearFactorGraph graph_factors_request;
 
   std::mutex global_mapping_mutex;
   std::shared_ptr<glim::GlobalMappingBase> global_mapping;

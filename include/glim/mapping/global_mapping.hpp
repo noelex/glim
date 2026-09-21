@@ -67,6 +67,7 @@ public:
   virtual void insert_submap(const SubMap::Ptr& submap) override;
 
   virtual void find_overlapping_submaps(double min_overlap) override;
+  virtual void add_graph_factors(const gtsam::NonlinearFactorGraph& factors) override;
   virtual void optimize() override;
   virtual GraphEditState graph_edit_state() const override;
   virtual void merge_sessions(const SessionMergeOptions& options) override;
@@ -85,9 +86,14 @@ private:
 
   std::shared_ptr<gtsam::NonlinearFactorGraph> create_between_factors(int current) const;
   std::shared_ptr<gtsam::NonlinearFactorGraph> create_matching_cost_factors(int current) const;
+  gtsam::NonlinearFactorGraph create_overlapping_factors(
+    const gtsam::Values& values,
+    const gtsam::NonlinearFactorGraph& factors,
+    double min_overlap) const;
 
   void update_submaps();
   gtsam::ISAM2Params create_isam2_params() const;
+  bool try_commit_candidate();
   gtsam_points::ISAM2ResultExt update_isam2(const gtsam::NonlinearFactorGraph& new_factors, const gtsam::Values& new_values);
 
   void recover_graph() override;

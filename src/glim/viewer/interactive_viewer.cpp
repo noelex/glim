@@ -422,9 +422,9 @@ void InteractiveViewer::run_modals() {
   factors.erase(std::remove(factors.begin(), factors.end(), nullptr), factors.end());
 
   if (factors.size()) {
-    logger->info("optimizing...");
-    new_factors.insert(factors);
-    GlobalMappingCallbacks::request_to_optimize();
+    gtsam::NonlinearFactorGraph graph;
+    graph.add(factors);
+    GlobalMappingCallbacks::request_to_add_graph_factors(graph);
   }
 }
 
@@ -609,9 +609,6 @@ void InteractiveViewer::globalmap_on_update_submaps(const std::vector<SubMap::Pt
  * @brief Smoother update callback
  */
 void InteractiveViewer::globalmap_on_smoother_update(gtsam_points::ISAM2Ext& isam2, gtsam::NonlinearFactorGraph& new_factors, gtsam::Values& new_values) {
-  auto factors = this->new_factors.get_all_and_clear();
-  new_factors.add(factors);
-
   std::vector<std::tuple<FactorType, gtsam::Key, gtsam::Key>> inserted_factors;
 
   for (const auto& factor : new_factors) {
@@ -669,7 +666,6 @@ void InteractiveViewer::clear() {
   submaps.clear();
   submap_poses.clear();
   global_factors.clear();
-  new_factors.clear();
 
   guik::LightViewer::instance()->clear_drawables();
 }

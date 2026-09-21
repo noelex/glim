@@ -187,6 +187,13 @@ struct CandidateGraph {
 };
 
 /**
+ * @brief Append factors to a graph edit candidate and refresh its connectivity
+ * @param candidate Candidate graph to update
+ * @param factors Factors whose keys must already exist in the candidate
+ */
+void append_candidate_factors(CandidateGraph& candidate, const gtsam::NonlinearFactorGraph& factors);
+
+/**
  * @brief Apply a global rigid transform to a session's complete state
  * @param values Session values
  * @param transform Global transform applied to X/E and whose rotation is applied to V

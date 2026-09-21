@@ -13,6 +13,10 @@ namespace spdlog {
 class logger;
 }
 
+namespace gtsam {
+class NonlinearFactorGraph;
+}
+
 namespace glim {
 
 enum class GraphEditState;
@@ -54,6 +58,12 @@ public:
    * @brief Request to find new overlapping submaps
    */
   virtual void find_overlapping_submaps(double min_overlap);
+
+  /**
+   * @brief Add factors to the graph currently accepting edits
+   * @param factors Factors to add
+   */
+  virtual void add_graph_factors(const gtsam::NonlinearFactorGraph& factors);
 
   /**
    * @brief Request to perform optimization
