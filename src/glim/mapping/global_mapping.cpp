@@ -466,9 +466,9 @@ void GlobalMapping::merge_sessions(const SessionMergeOptions& options) {
 
     candidate = std::make_unique<CandidateGraph>(std::move(next_candidate));
     logger->info(
-      "session merge candidate: pruned {} submap(s), {} connected component(s)",
+      "session merge candidate: pruned {} submap(s), resulting in {} orphaned subgraph(s)",
       count_submaps(candidate->applied_prune_ranges),
-      candidate->connectivity.pose_component_count);
+      candidate->connectivity.orphaned_subgraph_count());
     edit_state = GraphEditState::CANDIDATE_EDITING;
     new_factors->resize(0);
     new_values->clear();

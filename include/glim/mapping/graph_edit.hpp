@@ -143,6 +143,9 @@ struct GraphConnectivity {
 
   /// @brief Check whether every pose is reachable from the gauge anchor
   bool all_poses_reachable() const { return unreachable_pose_keys.empty(); }
+
+  /// @brief Count pose components not containing the gauge anchor
+  std::size_t orphaned_subgraph_count() const { return all_poses_reachable() ? 0 : pose_component_count - 1; }
 };
 
 /**

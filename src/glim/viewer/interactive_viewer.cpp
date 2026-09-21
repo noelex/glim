@@ -104,7 +104,7 @@ InteractiveViewer::InteractiveViewer() : logger(create_module_logger("viewer")) 
   prune_range_end = -1;
   prune_start_input = 0;
   prune_end_input = 0;
-  candidate_component_count = 0;
+  candidate_orphaned_subgraph_count = 0;
 
   enable_partial_rendering = config.param("interactive_viewer", "enable_partial_rendering", false);
   partial_rendering_budget = config.param("interactive_viewer", "partial_rendering_budget", 1024);
@@ -395,8 +395,8 @@ void InteractiveViewer::drawable_selection() {
 
   if (edit_state == GraphEditState::CANDIDATE_EDITING) {
     ImGui::Separator();
-    if (candidate_component_count > 1) {
-      ImGui::TextColored(ImVec4(1.0f, 0.65f, 0.0f, 1.0f), "Graph has %zu connected components.", candidate_component_count);
+    if (candidate_orphaned_subgraph_count > 0) {
+      ImGui::TextColored(ImVec4(1.0f, 0.65f, 0.0f, 1.0f), "Graph has %zu orphaned subgraph(s).", candidate_orphaned_subgraph_count);
       ImGui::TextWrapped("Add loop closures or find overlapping submaps to connect the graph.");
     } else if (!candidate_diagnostic.empty()) {
       ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "Candidate graph could not be committed.");
@@ -534,6 +534,10 @@ bool InteractiveViewer::is_unavailable_submap(int submap_id) const {
   return submap_id >= 0 && submap_id < unavailable_submap_mask.size() && unavailable_submap_mask[submap_id];
 }
 
+bool InteractiveViewer::is_orphaned_submap(int submap_id) const {
+  return submap_id >= 0 && submap_id < orphaned_submap_mask.size() && orphaned_submap_mask[submap_id];
+}
+
 bool InteractiveViewer::is_source_submap(int submap_id) const {
   return submap_id >= 0 && submap_id < submaps.size() && !submaps.empty() && submaps[submap_id]->session_id == submaps.back()->session_id;
 }
@@ -659,7 +663,8 @@ void InteractiveViewer::reset_graph_edit_ui() {
   show_other_session = false;
   session_merge_in_progress = false;
   pending_merge_options.reset();
-  candidate_component_count = 0;
+  orphaned_submap_mask.clear();
+  candidate_orphaned_subgraph_count = 0;
   candidate_diagnostic.clear();
 }
 
@@ -777,7 +782,11 @@ void InteractiveViewer::update_viewer() {
 
     const Eigen::Affine3f submap_pose = submap_poses[i].cast<float>();
     const Eigen::Vector4f session_color = glk::colormap_categoricalf(glk::COLORMAP::TURBO, submap->session_id, 6);
+    const bool orphaned = is_orphaned_submap(submap->id);
     const bool selected_for_pruning = is_selected_for_pruning(submap->id);
+    const Eigen::Vector4f point_color = orphaned               ? Eigen::Vector4f(1.0f, 0.0f, 0.0f, points_alpha)
+                                        : selected_for_pruning ? Eigen::Vector4f(1.0f, 0.6f, 0.0f, points_alpha)
+                                                               : session_color;
 
     auto_z_range[0] = std::min(auto_z_range[0], submap_pose.translation().z());
     auto_z_range[1] = std::max(auto_z_range[1], submap_pose.translation().z());
@@ -785,9 +794,9 @@ void InteractiveViewer::update_viewer() {
     auto drawable = viewer->find_drawable("submap_" + std::to_string(submap->id));
     if (drawable.first) {
       drawable.first->add("model_matrix", submap_pose.matrix());
-      drawable.first->set_color(selected_for_pruning ? Eigen::Vector4f(1.0f, 0.6f, 0.0f, points_alpha) : session_color);
+      drawable.first->set_color(point_color).set_alpha(points_alpha);
 
-      if (selected_for_pruning) {
+      if (orphaned || selected_for_pruning) {
         drawable.first->set_color_mode(guik::ColorMode::FLAT_COLOR);
       } else {
         switch (color_mode) {
@@ -814,11 +823,8 @@ void InteractiveViewer::update_viewer() {
           1.0 / *std::max_element(submap->frame->intensities, submap->frame->intensities + submap->frame->size()));
       }
 
-      auto shader_setting = guik::Rainbow(submap_pose)
-                              .add("info_values", info)
-                              .set_color(selected_for_pruning ? Eigen::Vector4f(1.0f, 0.6f, 0.0f, points_alpha) : session_color)
-                              .set_alpha(points_alpha);
-      if (selected_for_pruning) {
+      auto shader_setting = guik::Rainbow(submap_pose).add("info_values", info).set_color(point_color).set_alpha(points_alpha);
+      if (orphaned || selected_for_pruning) {
         shader_setting.set_color_mode(guik::ColorMode::FLAT_COLOR);
       }
 
@@ -841,7 +847,9 @@ void InteractiveViewer::update_viewer() {
       "sphere_" + std::to_string(submap->id),
       glk::Primitives::sphere(),
       guik::FlatColor(
-        selected_for_pruning ? Eigen::Vector4f(1.0f, 0.6f, 0.0f, 0.7f) : Eigen::Vector4f(1.0f, 0.0f, 0.0f, 0.5f),
+        orphaned               ? Eigen::Vector4f(1.0f, 0.0f, 1.0f, 0.8f)
+        : selected_for_pruning ? Eigen::Vector4f(1.0f, 0.6f, 0.0f, 0.7f)
+                               : Eigen::Vector4f(1.0f, 0.0f, 0.0f, 0.5f),
         submap_pose * Eigen::UniformScaling<float>(sphere_scale))
         .add("info_values", info)
         .make_transparent());
@@ -1024,15 +1032,24 @@ void InteractiveViewer::globalmap_on_candidate_graph_updated(const CandidateGrap
     }
   }
 
+  std::vector<int> orphaned_submap_ids;
+  for (const auto key : candidate.connectivity.unreachable_pose_keys) {
+    orphaned_submap_ids.push_back(gtsam::Symbol(key).index());
+  }
+
   const auto factors = extract_display_factors(candidate.factors);
-  const std::size_t component_count = candidate.connectivity.pose_component_count;
+  const std::size_t orphaned_subgraph_count = candidate.connectivity.orphaned_subgraph_count();
   const std::string diagnostic = candidate.diagnostic;
-  invoke([this, poses, factors, component_count, diagnostic] {
+  invoke([this, poses, orphaned_submap_ids, factors, orphaned_subgraph_count, diagnostic] {
     for (const auto& [id, pose] : poses) {
       submap_poses[id] = pose;
     }
+    orphaned_submap_mask.assign(submaps.size(), 0);
+    for (const int id : orphaned_submap_ids) {
+      orphaned_submap_mask[id] = 1;
+    }
     global_factors = factors;
-    candidate_component_count = component_count;
+    candidate_orphaned_subgraph_count = orphaned_subgraph_count;
     candidate_diagnostic = diagnostic;
     update_viewer();
   });

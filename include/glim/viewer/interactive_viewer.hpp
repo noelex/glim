@@ -77,6 +77,7 @@ protected:
   void update_normalized_prune_ranges();
   bool is_prune_endpoint(int submap_id) const;
   bool is_unavailable_submap(int submap_id) const;
+  bool is_orphaned_submap(int submap_id) const;
   bool is_source_submap(int submap_id) const;
   bool is_selected_for_pruning(int submap_id) const;
   int count_selected_submaps(const std::vector<SubmapRange>& ranges) const;
@@ -143,8 +144,9 @@ protected:
   std::vector<SubmapRange> requested_source_prune_ranges;
   std::vector<SubmapRange> normalized_source_prune_ranges;
   std::vector<uint8_t> unavailable_submap_mask;
+  std::vector<uint8_t> orphaned_submap_mask;
   std::unique_ptr<SessionMergeOptions> pending_merge_options;
-  std::size_t candidate_component_count;
+  std::size_t candidate_orphaned_subgraph_count;
   std::string candidate_diagnostic;
 
   // Click information
