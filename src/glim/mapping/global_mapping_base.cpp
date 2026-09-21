@@ -31,7 +31,9 @@ void GlobalMappingBase::add_graph_factors(const gtsam::NonlinearFactorGraph&) {}
 
 void GlobalMappingBase::optimize() {}
 
-GraphEditState GlobalMappingBase::graph_edit_state() const { return GraphEditState::IDLE; }
+GraphEditState GlobalMappingBase::graph_edit_state() const {
+  return GraphEditState::IDLE;
+}
 
 void GlobalMappingBase::merge_sessions(const SessionMergeOptions&) {}
 
@@ -40,4 +42,4 @@ void GlobalMappingBase::recover_graph() {}
 std::shared_ptr<GlobalMappingBase> GlobalMappingBase::load_module(const std::string& so_name) {
   return load_module_from_so<GlobalMappingBase>(so_name, "create_global_mapping_module");
 }
-}
+}  // namespace glim

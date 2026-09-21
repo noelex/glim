@@ -86,12 +86,12 @@ private:
 
   std::shared_ptr<gtsam::NonlinearFactorGraph> create_between_factors(int current) const;
   std::shared_ptr<gtsam::NonlinearFactorGraph> create_matching_cost_factors(int current) const;
-  gtsam::NonlinearFactorGraph create_overlapping_factors(
-    const gtsam::Values& values,
-    const gtsam::NonlinearFactorGraph& factors,
-    double min_overlap) const;
+  gtsam::NonlinearFactorGraph create_overlapping_factors(const gtsam::Values& values, const gtsam::NonlinearFactorGraph& factors, double min_overlap) const;
 
   void update_submaps();
+  void rebuild_pruned_mask();
+  bool is_pruned(int submap_id) const;
+  int count_active_frames() const;
   gtsam::ISAM2Params create_isam2_params() const;
   bool try_commit_candidate();
   gtsam_points::ISAM2ResultExt update_isam2(const gtsam::NonlinearFactorGraph& new_factors, const gtsam::Values& new_values);
@@ -108,6 +108,9 @@ private:
   GraphEditState edit_state;
   int committed_submap_count;
   std::unique_ptr<CandidateGraph> candidate;
+  std::vector<SubmapRange> pruned_ranges;
+  std::vector<SubmapRange> pending_source_pruned_ranges;
+  std::vector<uint8_t> pruned_mask;
 
   std::unique_ptr<IMUIntegration> imu_integration;
   std::any stream_buffer_roundrobin;
